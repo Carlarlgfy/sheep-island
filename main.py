@@ -4,33 +4,26 @@ import random
 
 from mapgen import MapGenerator, WATER, SAND, DIRT, GRASS
 from sheep import Sheep
+from grass import TerrainRenderer, WATER_COLOR
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-SCREEN_W, SCREEN_H = 1280, 720
-FPS = 60
-
-MAP_W, MAP_H = 160, 160
+MAP_W, MAP_H = 480, 480
+MAX_POPULATION = 200
 
 TILE_SIZE_DEFAULT = 14.0
-TILE_SIZE_MIN     = 4.0
+TILE_SIZE_MIN     = 2.0
 TILE_SIZE_MAX     = 48.0
 ZOOM_FACTOR       = 1.1   # multiplicative zoom per step
-CAMERA_SPEED      = 4
+CAMERA_SPEED      = 55
 
-TILE_COLORS = {
-    WATER: (45,  110, 190),
-    SAND:  (210, 190, 130),
-    DIRT:  (139, 100,  60),
-    GRASS: ( 75, 155,  55),
-}
 
 STATE_TITLE = "title"
 STATE_PLAY  = "play"
 
-BOTTOM_BAR_H = 48  # height of the play-state toolbar at the bottom
+BOTTOM_BAR_H = 48
 
 
 # ---------------------------------------------------------------------------
@@ -43,56 +36,33 @@ def draw_button(surface, btn, font):
     surface.blit(label, label.get_rect(center=btn["rect"].center))
 
 
-def draw_title(screen, font_title, font_ui, buttons):
+def draw_title(screen, font_title, font_ui, buttons, screen_w, screen_h):
     screen.fill((18, 18, 36))
-
     title_surf = font_title.render("Sheep Island", True, (240, 215, 90))
-    screen.blit(title_surf, title_surf.get_rect(center=(SCREEN_W // 2, SCREEN_H // 3)))
-
+    screen.blit(title_surf, title_surf.get_rect(center=(screen_w // 2, screen_h // 3)))
     sub = font_ui.render("a procedural island simulator", True, (140, 140, 180))
-    screen.blit(sub, sub.get_rect(center=(SCREEN_W // 2, SCREEN_H // 3 + 64)))
-
+    screen.blit(sub, sub.get_rect(center=(screen_w // 2, screen_h // 3 + 64)))
     for btn in buttons:
         draw_button(screen, btn, font_ui)
 
 
-def draw_map(screen, grid, tile_size, cam_x, cam_y):
-    rows = len(grid)
-    cols = len(grid[0]) if rows else 0
-    ts   = max(1, round(tile_size))
-    cx   = int(cam_x)
-    cy   = int(cam_y)
 
-    start_col = max(0,    cx // ts)
-    start_row = max(0,    cy // ts)
-    end_col   = min(cols, start_col + SCREEN_W // ts + 2)
-    end_row   = min(rows, start_row + SCREEN_H // ts + 2)
-
-    for row in range(start_row, end_row):
-        for col in range(start_col, end_col):
-            color = TILE_COLORS[grid[row][col]]
-            rect  = pygame.Rect(col * ts - cx, row * ts - cy, ts, ts)
-            pygame.draw.rect(screen, color, rect)
-
-
-def draw_play_ui(screen, font_ui, back_btn, sheep_btn, sheep_tool, seed, tile_size):
-    # Bottom toolbar background
-    bar_rect = pygame.Rect(0, SCREEN_H - BOTTOM_BAR_H, SCREEN_W, BOTTOM_BAR_H)
+def draw_play_ui(screen, font_ui, back_btn, sheep_btn, sheep_tool,
+                 seed, tile_size, screen_w, screen_h, is_fullscreen, population):
+    bar_rect = pygame.Rect(0, screen_h - BOTTOM_BAR_H, screen_w, BOTTOM_BAR_H)
     pygame.draw.rect(screen, (30, 30, 30), bar_rect)
 
-    # Sheep button — highlight when tool is active
     sheep_btn["color"] = (60, 140, 60) if sheep_tool else (70, 70, 110)
     draw_button(screen, sheep_btn, font_ui)
 
-    # Hint text in bottom bar
+    fs_hint = "F11: windowed" if is_fullscreen else "F11: fullscreen"
     hint = font_ui.render(
-        f"Seed: {seed}   Zoom: {round(tile_size)}px   Arrows: move   Scroll/+/-: zoom",
+        f"Seed: {seed}   Zoom: {round(tile_size)}px   Sheep: {population}/{MAX_POPULATION}   "
+        f"WASD: move   Scroll/+/-: zoom   {fs_hint}",
         True, (160, 160, 160),
     )
     screen.blit(hint, hint.get_rect(midleft=(sheep_btn["rect"].right + 16,
-                                              SCREEN_H - BOTTOM_BAR_H // 2)))
-
-    # Back button (top-right)
+                                              screen_h - BOTTOM_BAR_H // 2)))
     draw_button(screen, back_btn, font_ui)
 
 
@@ -100,22 +70,76 @@ def draw_play_ui(screen, font_ui, back_btn, sheep_btn, sheep_tool, seed, tile_si
 # Camera utilities
 # ---------------------------------------------------------------------------
 
-def clamp_camera(cam_x, cam_y, tile_size):
+def clamp_camera(cam_x, cam_y, tile_size, screen_w, screen_h):
     map_px_w = MAP_W * tile_size
     map_px_h = MAP_H * tile_size
-    cam_x = max(0, min(cam_x, max(0, map_px_w - SCREEN_W)))
-    cam_y = max(0, min(cam_y, max(0, map_px_h - SCREEN_H)))
+    # When map fits inside the screen, center it (negative cam offset).
+    # Otherwise clamp to the valid scroll range so the map fills the screen edge.
+    if map_px_w <= screen_w:
+        cam_x = -(screen_w - map_px_w) / 2
+    else:
+        cam_x = max(0.0, min(cam_x, map_px_w - screen_w))
+    if map_px_h <= screen_h:
+        cam_y = -(screen_h - map_px_h) / 2
+    else:
+        cam_y = max(0.0, min(cam_y, map_px_h - screen_h))
     return cam_x, cam_y
 
 
-def zoom_camera(cam_x, cam_y, old_size, new_size):
+def zoom_camera(cam_x, cam_y, old_size, new_size, screen_w, screen_h):
     """Keep the screen center fixed while zooming."""
     scale    = new_size / old_size
-    center_x = cam_x + SCREEN_W // 2
-    center_y = cam_y + SCREEN_H // 2
-    cam_x    = int(center_x * scale) - SCREEN_W // 2
-    cam_y    = int(center_y * scale) - SCREEN_H // 2
-    return clamp_camera(cam_x, cam_y, new_size)
+    center_x = cam_x + screen_w // 2
+    center_y = cam_y + screen_h // 2
+    cam_x    = int(center_x * scale) - screen_w // 2
+    cam_y    = int(center_y * scale) - screen_h // 2
+    return clamp_camera(cam_x, cam_y, new_size, screen_w, screen_h)
+
+
+# ---------------------------------------------------------------------------
+# Button layout  (recalculated every frame so resize is seamless)
+# ---------------------------------------------------------------------------
+
+def update_button_layout(gen_btn, quit_btn, back_btn, sheep_btn, screen_w, screen_h):
+    bw, bh = 260, 58
+    bx = screen_w // 2 - bw // 2
+    gen_btn["rect"]   = pygame.Rect(bx, screen_h // 2 + 20,  bw, bh)
+    quit_btn["rect"]  = pygame.Rect(bx, screen_h // 2 + 100, bw, bh)
+    back_btn["rect"]  = pygame.Rect(screen_w - 165, 10, 155, 40)
+    sheep_btn["rect"] = pygame.Rect(10, screen_h - BOTTOM_BAR_H + 6, 100, 36)
+
+
+# ---------------------------------------------------------------------------
+# Grass creep
+# ---------------------------------------------------------------------------
+
+_CREEP_BATCH = 100   # tiles sampled per frame for probabilistic spread
+
+def grass_creep_update(grid: list, rows: int, cols: int):
+    """
+    Slowly spread grass onto adjacent dirt tiles only.
+    Each grass neighbour adds 0.5% chance per sample; sand never converts.
+    """
+    for _ in range(_CREEP_BATCH):
+        r = random.randint(0, rows - 1)
+        c = random.randint(0, cols - 1)
+
+        if grid[r][c] != DIRT:
+            continue
+
+        grass_n = 0
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < rows and 0 <= nc < cols and grid[nr][nc] == GRASS:
+                grass_n += 1
+
+        if grass_n == 0:
+            continue
+
+        # 0.5% per adjacent grass tile — very slow spread
+        prob = grass_n * 0.005
+        if random.random() < prob:
+            grid[r][c] = GRASS
 
 
 # ---------------------------------------------------------------------------
@@ -124,58 +148,41 @@ def zoom_camera(cam_x, cam_y, old_size, new_size):
 
 def main():
     pygame.init()
-    screen = pygame.display.set_mode((SCREEN_W, SCREEN_H))
+    screen = pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
     pygame.display.set_caption("Sheep Island")
     clock = pygame.time.Clock()
+    is_fullscreen = False
 
     Sheep.load_sprites()
 
     font_title = pygame.font.SysFont("Arial", 72, bold=True)
     font_ui    = pygame.font.SysFont("Arial", 20)
 
-    # --- Title screen buttons ---
-    bw, bh = 260, 58
-    bx = SCREEN_W // 2 - bw // 2
-
-    gen_btn = {
-        "label": "Generate Map",
-        "rect":  pygame.Rect(bx, SCREEN_H // 2 + 20, bw, bh),
-        "color": (55, 130, 55),
-    }
-    quit_btn = {
-        "label": "Quit",
-        "rect":  pygame.Rect(bx, SCREEN_H // 2 + 100, bw, bh),
-        "color": (150, 55, 55),
-    }
+    gen_btn   = {"label": "Generate Map", "rect": pygame.Rect(0, 0, 0, 0), "color": (55, 130, 55)}
+    quit_btn  = {"label": "Quit",         "rect": pygame.Rect(0, 0, 0, 0), "color": (150, 55, 55)}
+    back_btn  = {"label": "Back to Menu", "rect": pygame.Rect(0, 0, 0, 0), "color": (70, 70, 110)}
+    sheep_btn = {"label": "Sheep",        "rect": pygame.Rect(0, 0, 0, 0), "color": (70, 70, 110)}
     title_buttons = [gen_btn, quit_btn]
 
-    # --- Play state buttons ---
-    back_btn = {
-        "label": "Back to Menu",
-        "rect":  pygame.Rect(SCREEN_W - 165, 10, 155, 40),
-        "color": (70, 70, 110),
-    }
-    sheep_btn = {
-        "label": "Sheep",
-        "rect":  pygame.Rect(10, SCREEN_H - BOTTOM_BAR_H + 6, 100, 36),
-        "color": (70, 70, 110),
-    }
-
-    # --- Game state ---
-    state        = STATE_TITLE
-    grid         = None
-    current_seed = random.randint(0, 999_999)
-    tile_size    = TILE_SIZE_DEFAULT
-    cam_x, cam_y = 0.0, 0.0
+    state            = STATE_TITLE
+    grid             = None
+    terrain_renderer = None
+    current_seed     = random.randint(0, 999_999)
+    tile_size        = TILE_SIZE_DEFAULT
+    cam_x, cam_y     = 0.0, 0.0
     sheep_list: list[Sheep] = []
-    sheep_tool   = False      # True = clicking on map spawns a sheep
+    sheep_tool       = False
+    regrowth_timers: dict[tuple, float] = {}   # (row, col) → seconds until grass returns
 
     # ---------------------------------------------------------------------------
     # Game loop
     # ---------------------------------------------------------------------------
     while True:
-        dt        = clock.tick(FPS) / 1000.0
-        mouse_pos = pygame.mouse.get_pos()
+        dt                   = clock.tick(60) / 1000.0
+        screen_w, screen_h   = screen.get_size()
+        mouse_pos            = pygame.mouse.get_pos()
+
+        update_button_layout(gen_btn, quit_btn, back_btn, sheep_btn, screen_w, screen_h)
 
         # --- Events ---
         for event in pygame.event.get():
@@ -184,15 +191,27 @@ def main():
                 sys.exit()
 
             if event.type == pygame.KEYDOWN:
+                # Fullscreen toggle — works from any state
+                if event.key == pygame.K_F11:
+                    if is_fullscreen:
+                        screen = pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
+                        is_fullscreen = False
+                    else:
+                        screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+                        is_fullscreen = True
+                    screen_w, screen_h = screen.get_size()
+                    if grid is not None:
+                        cam_x, cam_y = clamp_camera(cam_x, cam_y, tile_size, screen_w, screen_h)
+
                 if state == STATE_PLAY:
                     if event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
                         new_size = min(TILE_SIZE_MAX, tile_size * ZOOM_FACTOR)
-                        cam_x, cam_y = zoom_camera(cam_x, cam_y, tile_size, new_size)
+                        cam_x, cam_y = zoom_camera(cam_x, cam_y, tile_size, new_size, screen_w, screen_h)
                         tile_size = new_size
 
                     elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
                         new_size = max(TILE_SIZE_MIN, tile_size / ZOOM_FACTOR)
-                        cam_x, cam_y = zoom_camera(cam_x, cam_y, tile_size, new_size)
+                        cam_x, cam_y = zoom_camera(cam_x, cam_y, tile_size, new_size, screen_w, screen_h)
                         tile_size = new_size
 
                     elif event.key == pygame.K_ESCAPE:
@@ -205,7 +224,7 @@ def main():
                     new_size = min(TILE_SIZE_MAX, tile_size * ZOOM_FACTOR)
                 else:
                     new_size = max(TILE_SIZE_MIN, tile_size / ZOOM_FACTOR)
-                cam_x, cam_y = zoom_camera(cam_x, cam_y, tile_size, new_size)
+                cam_x, cam_y = zoom_camera(cam_x, cam_y, tile_size, new_size, screen_w, screen_h)
                 tile_size = new_size
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
@@ -213,13 +232,15 @@ def main():
                     if gen_btn["rect"].collidepoint(mouse_pos):
                         current_seed = random.randint(0, 999_999)
                         generator    = MapGenerator(MAP_W, MAP_H, seed=current_seed)
-                        grid         = generator.generate()
-                        tile_size    = TILE_SIZE_DEFAULT
-                        cam_x        = max(0.0, (MAP_W * tile_size - SCREEN_W) / 2)
-                        cam_y        = max(0.0, (MAP_H * tile_size - SCREEN_H) / 2)
-                        sheep_list   = []
-                        sheep_tool   = False
-                        state        = STATE_PLAY
+                        grid             = generator.generate()
+                        terrain_renderer = TerrainRenderer(grid)
+                        tile_size        = TILE_SIZE_DEFAULT
+                        cam_x            = max(0.0, (MAP_W * tile_size - screen_w) / 2)
+                        cam_y            = max(0.0, (MAP_H * tile_size - screen_h) / 2)
+                        sheep_list       = []
+                        sheep_tool       = False
+                        regrowth_timers  = {}
+                        state            = STATE_PLAY
 
                     elif quit_btn["rect"].collidepoint(mouse_pos):
                         pygame.quit()
@@ -235,9 +256,7 @@ def main():
                         sheep_tool = not sheep_tool
 
                     elif sheep_tool:
-                        # Click is in the map area — try to spawn a sheep
-                        # Ignore clicks that land on the bottom toolbar
-                        if mouse_pos[1] < SCREEN_H - BOTTOM_BAR_H:
+                        if mouse_pos[1] < screen_h - BOTTOM_BAR_H:
                             world_x = mouse_pos[0] + cam_x
                             world_y = mouse_pos[1] + cam_y
                             ts      = max(1, round(tile_size))
@@ -253,34 +272,55 @@ def main():
         if state == STATE_PLAY:
             speed = max(1.0, CAMERA_SPEED * tile_size / TILE_SIZE_DEFAULT)
             keys  = pygame.key.get_pressed()
-            if keys[pygame.K_LEFT]:
+            if keys[pygame.K_a]:
                 cam_x -= speed
-            if keys[pygame.K_RIGHT]:
+            if keys[pygame.K_d]:
                 cam_x += speed
-            if keys[pygame.K_UP]:
+            if keys[pygame.K_w]:
                 cam_y -= speed
-            if keys[pygame.K_DOWN]:
+            if keys[pygame.K_s]:
                 cam_y += speed
-            cam_x, cam_y = clamp_camera(cam_x, cam_y, tile_size)
+            cam_x, cam_y = clamp_camera(cam_x, cam_y, tile_size, screen_w, screen_h)
 
-            # --- Update sheep ---
+            new_sheep: list[Sheep] = []
             for sheep in sheep_list:
-                sheep.update(dt, grid)
+                sheep.update(dt, grid, regrowth_timers, sheep_list, new_sheep)
+            # Remove sheep that died this frame
+            sheep_list = [s for s in sheep_list if s.alive]
+            # Add offspring, respecting population cap
+            slots = MAX_POPULATION - len(sheep_list)
+            if slots > 0 and new_sheep:
+                sheep_list.extend(new_sheep[:slots])
+
+            # Grass regrowth — tick timers, restore tiles that are ready
+            for pos in list(regrowth_timers):
+                regrowth_timers[pos] -= dt
+                if regrowth_timers[pos] <= 0:
+                    r, c = pos
+                    if 0 <= r < len(grid) and 0 <= c < len(grid[0]):
+                        grid[r][c] = GRASS
+                    del regrowth_timers[pos]
+
+            terrain_renderer.update(dt)
+
+            rows = len(grid)
+            cols = len(grid[0]) if rows else 0
+            grass_creep_update(grid, rows, cols)
 
         # --- Render ---
         if state == STATE_TITLE:
-            draw_title(screen, font_title, font_ui, title_buttons)
+            draw_title(screen, font_title, font_ui, title_buttons, screen_w, screen_h)
 
         elif state == STATE_PLAY:
-            screen.fill((0, 0, 0))
-            draw_map(screen, grid, tile_size, cam_x, cam_y)
+            screen.fill(WATER_COLOR)
+            terrain_renderer.draw(screen, tile_size, cam_x, cam_y, screen_w, screen_h)
             for sheep in sheep_list:
                 sheep.draw(screen, cam_x, cam_y, tile_size)
             draw_play_ui(screen, font_ui, back_btn, sheep_btn, sheep_tool,
-                         current_seed, tile_size)
+                         current_seed, tile_size, screen_w, screen_h, is_fullscreen,
+                         len(sheep_list))
 
-            # Crosshair cursor hint when sheep tool is active
-            if sheep_tool and mouse_pos[1] < SCREEN_H - BOTTOM_BAR_H:
+            if sheep_tool and mouse_pos[1] < screen_h - BOTTOM_BAR_H:
                 mx, my = mouse_pos
                 pygame.draw.line(screen, (255, 255, 255), (mx - 8, my), (mx + 8, my), 1)
                 pygame.draw.line(screen, (255, 255, 255), (mx, my - 8), (mx, my + 8), 1)
