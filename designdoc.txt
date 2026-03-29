@@ -1,49 +1,7 @@
-grass.py should represent the grass moving and growing on the map only
-onto the dirt blocks i guess so it needs to be
-its own class with attricbutes and behaviors
-kind of like in minecraft dirt grows
+Okay the population a certain patch of grass can sustain
+needs to be more carefully established
 
+death animation needs to be established
 
-main.py should initialize and import 
-random and pygame and draw a screen
-it should also handle the main logic of the game 
-and the world logic i suppose
-
-sheep and wolf docs should not really be called yet 
-because right now we just want to work on map gen
-
-mapgen . py should be a whole class or a number of classes 
-devoted exclusiovely to creating and randomyl generating maps
-each mpa should be an island that is random generated based 
-on the logic and rules of the world
-
-so right now for this part of the development 
-process we are just using really focusing on the logic. basically
-each map should be on a sort of grid system of 64x64 pixels i guess.
-and then the outer most layer of the map should always be water, 
-then sand, then dirt, then grass
-
-so basically there needs to be an algorithm created 
-that handles all of these biomes
-and places their transitionary blocks correctly
-and there also needs to be an algo that will flips around the corner 
-and diffusion blocks effectively so that they are aligned right
-
-also we need to be able to scroll in and out of the map right 
-from the start and see more 
-or less detail on the map the more we scroll out or in
-
-
-So basically to sumarrize I am trying to make a map top down view
-kind of like in prison architect
-except with certain biome mechanics where grass will grow
-
-but those and the animations i have created can be added later. 
-
-so for now we just need to get a title 
-screen with a quit button and a 
-map gen button which initiliazes a map and an exit button when 
-the map has loaded 
-to leave the map for the main menu
-
-eventually we will need to make a map editor as well
+grass creep into dirt needs to be established,
+grass isnt creeping into dirt the way it should be.

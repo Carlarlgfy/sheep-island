@@ -1,6 +1,7 @@
 import pygame
 import sys
 import random
+import math
 
 from mapgen import MapGenerator, WATER, SAND, DIRT, GRASS
 from sheep import Sheep
@@ -11,7 +12,6 @@ from grass import TerrainRenderer, WATER_COLOR
 # ---------------------------------------------------------------------------
 
 MAP_W, MAP_H = 480, 480
-MAX_POPULATION = 200
 
 TILE_SIZE_DEFAULT = 14.0
 TILE_SIZE_MIN     = 2.0
@@ -23,7 +23,12 @@ CAMERA_SPEED      = 55
 STATE_TITLE = "title"
 STATE_PLAY  = "play"
 
+DAY_CYCLE_DURATION = 300.0   # seconds for a full day/night cycle
+
 BOTTOM_BAR_H = 48
+
+SPEED_SCALES  = [0, 1, 3, 8]    # sim dt multipliers: paused, 1x, 3x, 8x
+SPEED_LABELS  = ["||", ">", ">>", ">>>"]
 
 
 # ---------------------------------------------------------------------------
@@ -48,7 +53,8 @@ def draw_title(screen, font_title, font_ui, buttons, screen_w, screen_h):
 
 
 def draw_play_ui(screen, font_ui, back_btn, sheep_btn, sheep_tool,
-                 seed, tile_size, screen_w, screen_h, is_fullscreen, population):
+                 seed, tile_size, screen_w, screen_h, is_fullscreen, population,
+                 speed_btns, sim_speed_idx):
     bar_rect = pygame.Rect(0, screen_h - BOTTOM_BAR_H, screen_w, BOTTOM_BAR_H)
     pygame.draw.rect(screen, (30, 30, 30), bar_rect)
 
@@ -57,13 +63,23 @@ def draw_play_ui(screen, font_ui, back_btn, sheep_btn, sheep_tool,
 
     fs_hint = "F11: windowed" if is_fullscreen else "F11: fullscreen"
     hint = font_ui.render(
-        f"Seed: {seed}   Zoom: {round(tile_size)}px   Sheep: {population}/{MAX_POPULATION}   "
+        f"Seed: {seed}   Zoom: {round(tile_size)}px   Sheep: {population}   "
         f"WASD: move   Scroll/+/-: zoom   {fs_hint}",
         True, (160, 160, 160),
     )
     screen.blit(hint, hint.get_rect(midleft=(sheep_btn["rect"].right + 16,
                                               screen_h - BOTTOM_BAR_H // 2)))
     draw_button(screen, back_btn, font_ui)
+
+    # Speed buttons — highlight the active one
+    for i, btn in enumerate(speed_btns):
+        if i == sim_speed_idx:
+            btn["color"] = (220, 160, 40)   # gold = active
+        elif i == 0:
+            btn["color"] = (130, 55, 55)    # red tint for pause
+        else:
+            btn["color"] = (55, 100, 55)    # green tint for play speeds
+        draw_button(screen, btn, font_ui)
 
 
 # ---------------------------------------------------------------------------
@@ -100,25 +116,35 @@ def zoom_camera(cam_x, cam_y, old_size, new_size, screen_w, screen_h):
 # Button layout  (recalculated every frame so resize is seamless)
 # ---------------------------------------------------------------------------
 
-def update_button_layout(gen_btn, quit_btn, back_btn, sheep_btn, screen_w, screen_h):
+def update_button_layout(gen_btn, quit_btn, back_btn, sheep_btn, speed_btns, screen_w, screen_h):
     bw, bh = 260, 58
     bx = screen_w // 2 - bw // 2
     gen_btn["rect"]   = pygame.Rect(bx, screen_h // 2 + 20,  bw, bh)
     quit_btn["rect"]  = pygame.Rect(bx, screen_h // 2 + 100, bw, bh)
-    back_btn["rect"]  = pygame.Rect(screen_w - 165, 10, 155, 40)
+    back_btn["rect"]  = pygame.Rect(10, 10, 155, 40)
     sheep_btn["rect"] = pygame.Rect(10, screen_h - BOTTOM_BAR_H + 6, 100, 36)
+
+    # Speed buttons — top right, horizontal row
+    sbw, sbh = 44, 34
+    gap = 6
+    total_w = len(speed_btns) * sbw + (len(speed_btns) - 1) * gap
+    sx = screen_w - total_w - 10
+    sy = 10
+    for i, btn in enumerate(speed_btns):
+        btn["rect"] = pygame.Rect(sx + i * (sbw + gap), sy, sbw, sbh)
 
 
 # ---------------------------------------------------------------------------
 # Grass creep
 # ---------------------------------------------------------------------------
 
-_CREEP_BATCH = 100   # tiles sampled per frame for probabilistic spread
+_CREEP_BATCH = 120   # tiles sampled per frame for probabilistic spread
 
 def grass_creep_update(grid: list, rows: int, cols: int):
     """
-    Slowly spread grass onto adjacent dirt tiles only.
-    Each grass neighbour adds 0.5% chance per sample; sand never converts.
+    Very slowly spread grass onto adjacent dirt tiles only.
+    Each grass neighbour adds a tiny chance per sample; sand never converts.
+    Given enough time all connected dirt will eventually become grass.
     """
     for _ in range(_CREEP_BATCH):
         r = random.randint(0, rows - 1)
@@ -136,8 +162,8 @@ def grass_creep_update(grid: list, rows: int, cols: int):
         if grass_n == 0:
             continue
 
-        # 0.5% per adjacent grass tile — very slow spread
-        prob = grass_n * 0.005
+        # ~0.06% per adjacent grass tile — very very slow spread
+        prob = grass_n * 0.0006
         if random.random() < prob:
             grid[r][c] = GRASS
 
@@ -162,7 +188,10 @@ def main():
     quit_btn  = {"label": "Quit",         "rect": pygame.Rect(0, 0, 0, 0), "color": (150, 55, 55)}
     back_btn  = {"label": "Back to Menu", "rect": pygame.Rect(0, 0, 0, 0), "color": (70, 70, 110)}
     sheep_btn = {"label": "Sheep",        "rect": pygame.Rect(0, 0, 0, 0), "color": (70, 70, 110)}
+    speed_btns = [{"label": lbl, "rect": pygame.Rect(0, 0, 0, 0), "color": (70, 70, 110)}
+                  for lbl in SPEED_LABELS]
     title_buttons = [gen_btn, quit_btn]
+    sim_speed_idx = 1   # default: normal speed
 
     state            = STATE_TITLE
     grid             = None
@@ -173,6 +202,7 @@ def main():
     sheep_list: list[Sheep] = []
     sheep_tool       = False
     regrowth_timers: dict[tuple, float] = {}   # (row, col) → seconds until grass returns
+    time_of_day      = 0.0   # seconds into current day cycle
 
     # ---------------------------------------------------------------------------
     # Game loop
@@ -182,7 +212,7 @@ def main():
         screen_w, screen_h   = screen.get_size()
         mouse_pos            = pygame.mouse.get_pos()
 
-        update_button_layout(gen_btn, quit_btn, back_btn, sheep_btn, screen_w, screen_h)
+        update_button_layout(gen_btn, quit_btn, back_btn, sheep_btn, speed_btns, screen_w, screen_h)
 
         # --- Events ---
         for event in pygame.event.get():
@@ -255,7 +285,13 @@ def main():
                     elif sheep_btn["rect"].collidepoint(mouse_pos):
                         sheep_tool = not sheep_tool
 
-                    elif sheep_tool:
+                    else:
+                        for i, btn in enumerate(speed_btns):
+                            if btn["rect"].collidepoint(mouse_pos):
+                                sim_speed_idx = i
+                                break
+
+                    if sheep_tool and state == STATE_PLAY:
                         if mouse_pos[1] < screen_h - BOTTOM_BAR_H:
                             world_x = mouse_pos[0] + cam_x
                             world_y = mouse_pos[1] + cam_y
@@ -282,30 +318,32 @@ def main():
                 cam_y += speed
             cam_x, cam_y = clamp_camera(cam_x, cam_y, tile_size, screen_w, screen_h)
 
+            dt_sim = dt * SPEED_SCALES[sim_speed_idx]
+
+            time_of_day = (time_of_day + dt_sim) % DAY_CYCLE_DURATION
+
             new_sheep: list[Sheep] = []
             for sheep in sheep_list:
-                sheep.update(dt, grid, regrowth_timers, sheep_list, new_sheep)
-            # Remove sheep that died this frame
+                sheep.update(dt_sim, grid, regrowth_timers, sheep_list, new_sheep)
+            # Remove sheep that died this frame, then add all offspring
             sheep_list = [s for s in sheep_list if s.alive]
-            # Add offspring, respecting population cap
-            slots = MAX_POPULATION - len(sheep_list)
-            if slots > 0 and new_sheep:
-                sheep_list.extend(new_sheep[:slots])
+            sheep_list.extend(new_sheep)
 
             # Grass regrowth — tick timers, restore tiles that are ready
             for pos in list(regrowth_timers):
-                regrowth_timers[pos] -= dt
+                regrowth_timers[pos] -= dt_sim
                 if regrowth_timers[pos] <= 0:
                     r, c = pos
                     if 0 <= r < len(grid) and 0 <= c < len(grid[0]):
                         grid[r][c] = GRASS
                     del regrowth_timers[pos]
 
-            terrain_renderer.update(dt)
+            terrain_renderer.update(dt_sim)
 
-            rows = len(grid)
-            cols = len(grid[0]) if rows else 0
-            grass_creep_update(grid, rows, cols)
+            if dt_sim > 0:
+                rows = len(grid)
+                cols = len(grid[0]) if rows else 0
+                grass_creep_update(grid, rows, cols)
 
         # --- Render ---
         if state == STATE_TITLE:
@@ -316,9 +354,20 @@ def main():
             terrain_renderer.draw(screen, tile_size, cam_x, cam_y, screen_w, screen_h)
             for sheep in sheep_list:
                 sheep.draw(screen, cam_x, cam_y, tile_size)
+
+            # Day/night overlay — sine curve: 0=day, 1=midnight
+            cycle_pos = time_of_day / DAY_CYCLE_DURATION
+            night_factor = 0.5 - 0.5 * math.cos(2 * math.pi * cycle_pos)
+            if night_factor > 0.01:
+                alpha = int(night_factor * 155)   # max ~155 at midnight — dark but visible
+                night_surf = pygame.Surface((screen_w, screen_h))
+                night_surf.fill((8, 18, 55))      # deep blue tint
+                night_surf.set_alpha(alpha)
+                screen.blit(night_surf, (0, 0))
+
             draw_play_ui(screen, font_ui, back_btn, sheep_btn, sheep_tool,
                          current_seed, tile_size, screen_w, screen_h, is_fullscreen,
-                         len(sheep_list))
+                         len(sheep_list), speed_btns, sim_speed_idx)
 
             if sheep_tool and mouse_pos[1] < screen_h - BOTTOM_BAR_H:
                 mx, my = mouse_pos
