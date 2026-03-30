@@ -1,4 +1,5 @@
 import pygame
+import random
 from mapgen import WATER, SAND, DIRT, GRASS
 
 # ---------------------------------------------------------------------------
@@ -253,3 +254,62 @@ class TerrainRenderer:
                 # Slightly lighter green fringe where grass overhangs dirt
                 fringe = _lighten(base_color, 14)
                 pygame.draw.rect(screen, fringe, strip)
+
+
+# ---------------------------------------------------------------------------
+# Grass spreading (frontier BFS)
+# ---------------------------------------------------------------------------
+
+# Tiles converted per sim-second at 1× speed.
+# At 60 fps × 1× speed (dt_sim ≈ 1/60): ~20 conversions per frame = 1 200/s.
+# Scales with sim speed (3×, 8×) automatically.
+_SPREAD_RATE = 100
+
+
+class GrassSpread:
+    """
+    Tracks the frontier of dirt tiles adjacent to grass and converts them
+    progressively each frame.  Much faster than random-sampling the whole map
+    because every candidate is already guaranteed to border existing grass.
+    """
+
+    def __init__(self, grid: list[list[str]]):
+        self.grid = grid
+        self.rows = len(grid)
+        self.cols = len(grid[0]) if self.rows else 0
+        # Seed the frontier: every dirt tile that touches at least one grass tile
+        self.frontier: set[tuple[int, int]] = set()
+        for r in range(self.rows):
+            for c in range(self.cols):
+                if grid[r][c] == DIRT and self._borders_grass(r, c):
+                    self.frontier.add((r, c))
+
+    # ------------------------------------------------------------------
+
+    def _borders_grass(self, r: int, c: int) -> bool:
+        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < self.rows and 0 <= nc < self.cols:
+                if self.grid[nr][nc] == GRASS:
+                    return True
+        return False
+
+    def update(self, dt_sim: float):
+        if dt_sim <= 0 or not self.frontier:
+            return
+
+        n = max(1, int(_SPREAD_RATE * dt_sim))
+        candidates = random.sample(list(self.frontier), min(n, len(self.frontier)))
+
+        for (r, c) in candidates:
+            if self.grid[r][c] != DIRT:
+                self.frontier.discard((r, c))
+                continue
+            # Convert this tile and add its dirt neighbours to the frontier
+            self.grid[r][c] = GRASS
+            self.frontier.discard((r, c))
+            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < self.rows and 0 <= nc < self.cols:
+                    if self.grid[nr][nc] == DIRT:
+                        self.frontier.add((nr, nc))

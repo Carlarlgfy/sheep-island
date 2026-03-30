@@ -5,13 +5,14 @@ import math
 
 from mapgen import MapGenerator, WATER, SAND, DIRT, GRASS
 from sheep import Sheep
-from grass import TerrainRenderer, WATER_COLOR
+from grass import TerrainRenderer, GrassSpread, WATER_COLOR
+from herd import HerdManager
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-MAP_W, MAP_H = 480, 480
+MAP_W, MAP_H = 720, 720
 
 TILE_SIZE_DEFAULT = 14.0
 TILE_SIZE_MIN     = 2.0
@@ -54,7 +55,7 @@ def draw_title(screen, font_title, font_ui, buttons, screen_w, screen_h):
 
 def draw_play_ui(screen, font_ui, back_btn, sheep_btn, sheep_tool,
                  seed, tile_size, screen_w, screen_h, is_fullscreen, population,
-                 speed_btns, sim_speed_idx):
+                 speed_btns, sim_speed_idx, day_number):
     bar_rect = pygame.Rect(0, screen_h - BOTTOM_BAR_H, screen_w, BOTTOM_BAR_H)
     pygame.draw.rect(screen, (30, 30, 30), bar_rect)
 
@@ -63,7 +64,7 @@ def draw_play_ui(screen, font_ui, back_btn, sheep_btn, sheep_tool,
 
     fs_hint = "F11: windowed" if is_fullscreen else "F11: fullscreen"
     hint = font_ui.render(
-        f"Seed: {seed}   Zoom: {round(tile_size)}px   Sheep: {population}   "
+        f"Day {day_number}   Seed: {seed}   Zoom: {round(tile_size)}px   Sheep: {population}   "
         f"WASD: move   Scroll/+/-: zoom   {fs_hint}",
         True, (160, 160, 160),
     )
@@ -135,40 +136,6 @@ def update_button_layout(gen_btn, quit_btn, back_btn, sheep_btn, speed_btns, scr
 
 
 # ---------------------------------------------------------------------------
-# Grass creep
-# ---------------------------------------------------------------------------
-
-_CREEP_BATCH = 120   # tiles sampled per frame for probabilistic spread
-
-def grass_creep_update(grid: list, rows: int, cols: int):
-    """
-    Very slowly spread grass onto adjacent dirt tiles only.
-    Each grass neighbour adds a tiny chance per sample; sand never converts.
-    Given enough time all connected dirt will eventually become grass.
-    """
-    for _ in range(_CREEP_BATCH):
-        r = random.randint(0, rows - 1)
-        c = random.randint(0, cols - 1)
-
-        if grid[r][c] != DIRT:
-            continue
-
-        grass_n = 0
-        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-            nr, nc = r + dr, c + dc
-            if 0 <= nr < rows and 0 <= nc < cols and grid[nr][nc] == GRASS:
-                grass_n += 1
-
-        if grass_n == 0:
-            continue
-
-        # ~0.06% per adjacent grass tile — very very slow spread
-        prob = grass_n * 0.0006
-        if random.random() < prob:
-            grid[r][c] = GRASS
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -196,6 +163,7 @@ def main():
     state            = STATE_TITLE
     grid             = None
     terrain_renderer = None
+    grass_spread     = None
     current_seed     = random.randint(0, 999_999)
     tile_size        = TILE_SIZE_DEFAULT
     cam_x, cam_y     = 0.0, 0.0
@@ -203,6 +171,8 @@ def main():
     sheep_tool       = False
     regrowth_timers: dict[tuple, float] = {}   # (row, col) → seconds until grass returns
     time_of_day      = 0.0   # seconds into current day cycle
+    day_number       = 1
+    herd_manager     = HerdManager()
 
     # ---------------------------------------------------------------------------
     # Game loop
@@ -264,12 +234,16 @@ def main():
                         generator    = MapGenerator(MAP_W, MAP_H, seed=current_seed)
                         grid             = generator.generate()
                         terrain_renderer = TerrainRenderer(grid)
+                        grass_spread     = GrassSpread(grid)
                         tile_size        = TILE_SIZE_DEFAULT
                         cam_x            = max(0.0, (MAP_W * tile_size - screen_w) / 2)
                         cam_y            = max(0.0, (MAP_H * tile_size - screen_h) / 2)
                         sheep_list       = []
                         sheep_tool       = False
                         regrowth_timers  = {}
+                        time_of_day      = 0.0
+                        day_number       = 1
+                        herd_manager     = HerdManager()
                         state            = STATE_PLAY
 
                     elif quit_btn["rect"].collidepoint(mouse_pos):
@@ -320,7 +294,12 @@ def main():
 
             dt_sim = dt * SPEED_SCALES[sim_speed_idx]
 
+            prev_time_of_day = time_of_day
             time_of_day = (time_of_day + dt_sim) % DAY_CYCLE_DURATION
+            if time_of_day < prev_time_of_day:
+                day_number += 1
+
+            herd_manager.update(dt_sim, sheep_list)
 
             new_sheep: list[Sheep] = []
             for sheep in sheep_list:
@@ -340,10 +319,8 @@ def main():
 
             terrain_renderer.update(dt_sim)
 
-            if dt_sim > 0:
-                rows = len(grid)
-                cols = len(grid[0]) if rows else 0
-                grass_creep_update(grid, rows, cols)
+            if grass_spread is not None:
+                grass_spread.update(dt_sim)
 
         # --- Render ---
         if state == STATE_TITLE:
@@ -367,7 +344,7 @@ def main():
 
             draw_play_ui(screen, font_ui, back_btn, sheep_btn, sheep_tool,
                          current_seed, tile_size, screen_w, screen_h, is_fullscreen,
-                         len(sheep_list), speed_btns, sim_speed_idx)
+                         len(sheep_list), speed_btns, sim_speed_idx, day_number)
 
             if sheep_tool and mouse_pos[1] < screen_h - BOTTOM_BAR_H:
                 mx, my = mouse_pos
