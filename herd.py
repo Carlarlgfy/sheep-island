@@ -19,6 +19,8 @@ HerdManager writes these attributes onto each animal every frame:
 import math
 import random
 
+from mapgen import WATER, GRASS, DIRT
+
 # ---------------------------------------------------------------------------
 # Tuning
 # ---------------------------------------------------------------------------
@@ -86,12 +88,15 @@ class HerdManager:
     def __init__(self):
         self._timer  = 0.0
         self._herds: dict[int, _HerdData] = {}
+        self._grid   = None
 
     # ------------------------------------------------------------------
     # Public
     # ------------------------------------------------------------------
 
-    def update(self, dt: float, animals: list):
+    def update(self, dt: float, animals: list, grid: list = None):
+        if grid is not None:
+            self._grid = grid
         self._timer -= dt
         if self._timer <= 0:
             self._timer = REASSIGN_INTERVAL
@@ -240,9 +245,8 @@ class HerdManager:
 
             elif data.state == _HerdData.GATHERING:
                 if data.timer <= 0:
-                    angle    = random.uniform(0, 2 * math.pi)
-                    data.mdx = math.cos(angle)
-                    data.mdy = math.sin(angle)
+                    data.mdx, data.mdy = self._pick_migration_dir(
+                        data.cx, data.cy, self._grid)
                     data.state = _HerdData.MIGRATING
                     data.timer = random.uniform(MIGRATION_DURATION_MIN,
                                                 MIGRATION_DURATION_MAX)
@@ -275,3 +279,55 @@ class HerdManager:
                     age_frac = min(1.0, a.age / MATURITY_GRAVITY_AGE)
                     a.herd_pull_strength = (GRAVITY_YOUNG
                                             + (GRAVITY_MATURE - GRAVITY_YOUNG) * age_frac)
+
+    # ------------------------------------------------------------------
+    # Terrain-aware migration direction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _pick_migration_dir(cx: float, cy: float,
+                            grid: list) -> tuple[float, float]:
+        """
+        Sample 16 candidate directions; score each by how much grass/dirt
+        lies ahead and how little water.  Returns (dx, dy) unit vector.
+        """
+        if grid is None:
+            angle = random.uniform(0, 2 * math.pi)
+            return math.cos(angle), math.sin(angle)
+
+        rows = len(grid)
+        cols = len(grid[0]) if rows else 0
+
+        n_candidates = 16
+        best_angle = random.uniform(0, 2 * math.pi)
+        best_score = -9999
+
+        for i in range(n_candidates):
+            angle = i * (2 * math.pi / n_candidates)
+            adx   = math.cos(angle)
+            ady   = math.sin(angle)
+            score = 0
+
+            # Walk up to 35 tiles ahead, sampling every 3 tiles
+            for step in range(4, 36, 3):
+                nx = int(cx + adx * step)
+                ny = int(cy + ady * step)
+                if 0 <= ny < rows and 0 <= nx < cols:
+                    t = grid[ny][nx]
+                    if t == GRASS:
+                        score += 4
+                    elif t == DIRT:
+                        score += 2
+                    elif t == WATER:
+                        score -= 6   # strongly penalise water ahead
+                    # sand: score unchanged
+                else:
+                    score -= 4       # penalise heading off-map
+
+            if score > best_score:
+                best_score = score
+                best_angle = angle
+
+        # Small noise so herds don't all march in axis-aligned lines
+        best_angle += random.gauss(0, 0.15)
+        return math.cos(best_angle), math.sin(best_angle)

@@ -17,7 +17,7 @@ HUNGER_THRESHOLD         = 0.55
 HUNGER_URGENCY_THRESHOLD = 0.65
 STARVING_THRESHOLD       = 0.80
 HUNGER_DEATH             = 1.0
-REGROWTH_TIME            = 45.0
+REGROWTH_TIME            = 90.0
 
 # ---------------------------------------------------------------------------
 # Lifespan  (extended)

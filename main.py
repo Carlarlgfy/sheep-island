@@ -12,7 +12,7 @@ from herd import HerdManager
 # Constants
 # ---------------------------------------------------------------------------
 
-MAP_W, MAP_H = 720, 720
+MAP_W, MAP_H = 1024, 1024
 
 TILE_SIZE_DEFAULT = 14.0
 TILE_SIZE_MIN     = 2.0
@@ -299,7 +299,7 @@ def main():
             if time_of_day < prev_time_of_day:
                 day_number += 1
 
-            herd_manager.update(dt_sim, sheep_list)
+            herd_manager.update(dt_sim, sheep_list, grid)
 
             new_sheep: list[Sheep] = []
             for sheep in sheep_list:

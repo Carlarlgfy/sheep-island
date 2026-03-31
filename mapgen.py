@@ -41,6 +41,8 @@ class MapGenerator:
         cy = self.height / 2.0
         max_dist = min(cx, cy) * 0.60  # island uses 60% of radius, leaving water border
 
+        self._arms = self._generate_arms(cx, cy, max_dist)
+
         self.grid = []
         for y in range(self.height):
             row = []
@@ -96,13 +98,54 @@ class MapGenerator:
         noise = self._fbm(nx, ny, octaves=5)
 
         # Blend: radial gradient dominates shape, noise distorts the edges
-        return radial * 0.62 + noise * 0.38
+        base = radial * 0.62 + noise * 0.38
+
+        # Peninsula arms extend land past the normal coastline
+        arm = self._arm_contribution(x, y, cx, cy)
+        return min(1.0, base + arm)
+
+    def _generate_arms(self, cx: float, cy: float,
+                       max_dist: float) -> list:
+        """Return a list of (angle, length, width) peninsula arm descriptors."""
+        rng = random.Random(self.seed ^ 0xBEEF_CAFE)
+        # ~60% chance of any peninsulas on a given map
+        if rng.random() < 0.40:
+            return []
+        n_arms = rng.randint(1, 3)
+        arms = []
+        for _ in range(n_arms):
+            angle  = rng.uniform(0, 2 * math.pi)
+            # length relative to island radius — extends well past the coast
+            length = rng.uniform(0.65, 1.20) * max_dist
+            width  = rng.uniform(0.09, 0.18) * max_dist
+            arms.append((angle, length, width))
+        return arms
+
+    def _arm_contribution(self, x: int, y: int,
+                          cx: float, cy: float) -> float:
+        """Boost terrain value along peninsula arms."""
+        if not self._arms:
+            return 0.0
+        best = 0.0
+        for angle, length, width in self._arms:
+            ax = math.cos(angle)
+            ay = math.sin(angle)
+            vx = x - cx
+            vy = y - cy
+            along = vx * ax + vy * ay           # signed distance along arm axis
+            perp  = abs(-vx * ay + vy * ax)     # perpendicular distance
+            if along < 0.05 * length or along > length:
+                continue
+            perp_f = math.exp(-(perp / width) ** 2)
+            tip_f  = math.sin(math.pi * along / length)   # tapers to 0 at tip
+            best = max(best, perp_f * tip_f * 0.55)
+        return best
 
     @staticmethod
     def _terrain_from_value(v: float) -> str:
         if v < 0.30:
             return WATER
-        if v < 0.42:
+        if v < 0.37:   # narrowed sand band (-~38%) — more dirt, less sand
             return SAND
         if v < 0.55:
             return DIRT
