@@ -70,10 +70,14 @@ class TerrainRenderer:
       • Edge-shadow strips where high terrain meets low (when tiles ≥ 3 px)
       • Foam highlight on sand→water border
       • Shallow-water tint on water→sand border
+      • Cached 1-pixel-per-tile surface for fast low-zoom rendering
 
-    Call update(dt) each frame (no-op for now; hook for future water animation).
+    Call update(dt) each frame.
     Call draw(screen, tile_size, cam_x, cam_y, screen_w, screen_h) to render.
     """
+
+    # Below this tile size the cached surface path is used (no sub-tile detail needed)
+    _LOW_ZOOM_THRESHOLD = 8
 
     def __init__(self, grid: list[list[str]]):
         self.grid = grid          # mutable reference — changes (eaten grass etc.) auto-reflect
@@ -86,12 +90,68 @@ class TerrainRenderer:
         ]
         self._wave_t = 0.0        # future water animation timer
 
+        # --- Cached 1px-per-tile surface for low-zoom rendering ---
+        self._map_surf: pygame.Surface | None = None
+        self._dirty: set[tuple[int, int]] = set()
+
+    # ------------------------------------------------------------------
+    # Cached surface helpers
+    # ------------------------------------------------------------------
+
+    def mark_dirty(self, row: int, col: int):
+        """Call whenever a tile's terrain type changes (eaten, regrown, etc.)."""
+        self._dirty.add((row, col))
+
+    def _build_map_surf(self):
+        """Build the 1px-per-tile cached surface using run-length encoded rows."""
+        rows = len(self.grid)
+        cols = len(self.grid[0]) if rows else 0
+        surf = pygame.Surface((cols, rows))
+        for r in range(rows):
+            row_data = self.grid[r]
+            c_start  = 0
+            cur_col  = BASE_COLORS[row_data[0]]
+            for c in range(1, cols):
+                col_color = BASE_COLORS[row_data[c]]
+                if col_color != cur_col:
+                    pygame.draw.rect(surf, cur_col, (c_start, r, c - c_start, 1))
+                    c_start  = c
+                    cur_col  = col_color
+            pygame.draw.rect(surf, cur_col, (c_start, r, cols - c_start, 1))
+        self._map_surf = surf
+
+    def _draw_cached(self, screen: pygame.Surface,
+                     cam_x: float, cam_y: float,
+                     screen_w: int, screen_h: int,
+                     rows: int, cols: int, ts: int):
+        """Blit a scaled crop of the cached map surface — O(1) draw calls."""
+        start_c = max(0, int(cam_x) // ts)
+        start_r = max(0, int(cam_y) // ts)
+        end_c   = min(cols, start_c + screen_w // ts + 2)
+        end_r   = min(rows, start_r + screen_h // ts + 2)
+        src_w   = end_c - start_c
+        src_h   = end_r - start_r
+        if src_w <= 0 or src_h <= 0:
+            return
+        src_rect = pygame.Rect(start_c, start_r, src_w, src_h)
+        sub      = self._map_surf.subsurface(src_rect)
+        scaled   = pygame.transform.scale(sub, (src_w * ts, src_h * ts))
+        screen.blit(scaled, (start_c * ts - int(cam_x), start_r * ts - int(cam_y)))
+
     # ------------------------------------------------------------------
     # Tick
     # ------------------------------------------------------------------
 
     def update(self, dt: float):
-        self._wave_t += dt        # reserved for shore animation later
+        self._wave_t += dt
+        # Apply pending tile changes to the cached surface
+        if self._map_surf is not None and self._dirty:
+            rows = len(self.grid)
+            cols = len(self.grid[0]) if rows else 0
+            for (r, c) in self._dirty:
+                if 0 <= r < rows and 0 <= c < cols:
+                    self._map_surf.set_at((c, r), BASE_COLORS[self.grid[r][c]])
+            self._dirty.clear()
 
     # ------------------------------------------------------------------
     # Main draw
@@ -105,6 +165,13 @@ class TerrainRenderer:
         ts   = max(1, round(tile_size))
         cx   = int(cam_x)
         cy   = int(cam_y)
+
+        # --- Fast path: cached surface for small tile sizes ---
+        if ts < self._LOW_ZOOM_THRESHOLD:
+            if self._map_surf is None:
+                self._build_map_surf()
+            self._draw_cached(screen, cam_x, cam_y, screen_w, screen_h, rows, cols, ts)
+            return
 
         start_col = max(0, cx // ts)
         start_row = max(0, cy // ts)
@@ -261,9 +328,8 @@ class TerrainRenderer:
 # ---------------------------------------------------------------------------
 
 # Tiles converted per sim-second at 1× speed.
-# At 60 fps × 1× speed (dt_sim ≈ 1/60): ~20 conversions per frame = 1 200/s.
 # Scales with sim speed (3×, 8×) automatically.
-_SPREAD_RATE = 100
+_SPREAD_RATE = 12
 
 
 class GrassSpread:
@@ -294,7 +360,7 @@ class GrassSpread:
                     return True
         return False
 
-    def update(self, dt_sim: float):
+    def update(self, dt_sim: float, notify=None):
         if dt_sim <= 0 or not self.frontier:
             return
 
@@ -308,6 +374,8 @@ class GrassSpread:
             # Convert this tile and add its dirt neighbours to the frontier
             self.grid[r][c] = GRASS
             self.frontier.discard((r, c))
+            if notify:
+                notify(r, c)
             for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
                 nr, nc = r + dr, c + dc
                 if 0 <= nr < self.rows and 0 <= nc < self.cols:

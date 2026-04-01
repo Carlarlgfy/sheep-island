@@ -17,7 +17,7 @@ HUNGER_THRESHOLD         = 0.55
 HUNGER_URGENCY_THRESHOLD = 0.65
 STARVING_THRESHOLD       = 0.80
 HUNGER_DEATH             = 1.0
-REGROWTH_TIME            = 90.0
+REGROWTH_TIME            = 240.0
 
 # ---------------------------------------------------------------------------
 # Lifespan  (extended)
@@ -28,13 +28,13 @@ LIFESPAN_MAX = 1800.0   # 30 minutes
 # ---------------------------------------------------------------------------
 # Herding / flocking
 # ---------------------------------------------------------------------------
-HERD_RADIUS          = 14.0
 HERD_COHESION_RADIUS = 22.0   # same-herd cohesion scan range
 SEPARATION_RADIUS    = 1.6
 SEPARATION_FORCE     = 1.4
 COHESION_WEIGHT      = 0.55   # nearby-flock cohesion weight
 SAME_HERD_WEIGHT     = 1.0    # multiplier on cohesion vector for same-herd members
-OTHER_HERD_WEIGHT    = 0.18   # multiplier on cohesion vector for different-herd members
+INTER_HERD_RADIUS    = 18.0   # radius within which other-herd sheep cause repulsion
+INTER_HERD_REPULSION = 0.35   # repulsion weight away from other-herd sheep
 FOLLOW_RADIUS        = 9.0
 FOLLOW_CHANCE        = 0.35
 
@@ -225,9 +225,11 @@ class Sheep:
         # Curious sheep weight random more; homebodies weight cohesion more
         rand_w = 0.25 + self.curiosity * 0.45
 
-        # 1. Nearby flock cohesion
+        # 1. Nearby flock cohesion (same herd) + inter-herd repulsion
         if flock:
-            hx, hy, count = 0.0, 0.0, 0
+            cohesion_w = max(0.10, COHESION_WEIGHT - self.curiosity * 0.25)
+            same_hx, same_hy, same_count = 0.0, 0.0, 0
+            repel_x,  repel_y,  rep_count = 0.0, 0.0, 0
             for other in flock:
                 if other is self:
                     continue
@@ -236,19 +238,20 @@ class Sheep:
                 dist = math.sqrt(ddx * ddx + ddy * ddy)
                 same_herd = (self.herd_id != -1 and other.herd_id == self.herd_id)
                 if same_herd and 0 < dist < HERD_COHESION_RADIUS:
-                    hx += (ddx / dist) * SAME_HERD_WEIGHT
-                    hy += (ddy / dist) * SAME_HERD_WEIGHT
-                    count += 1
-                elif not same_herd and 0 < dist < HERD_RADIUS:
-                    hx += (ddx / dist) * OTHER_HERD_WEIGHT
-                    hy += (ddy / dist) * OTHER_HERD_WEIGHT
-                    count += 1
-            if count > 0:
-                hx /= count
-                hy /= count
-                cohesion_w = max(0.10, COHESION_WEIGHT - self.curiosity * 0.25)
-                bx = bx * rand_w + hx * cohesion_w
-                by = by * rand_w + hy * cohesion_w
+                    same_hx += (ddx / dist) * SAME_HERD_WEIGHT
+                    same_hy += (ddy / dist) * SAME_HERD_WEIGHT
+                    same_count += 1
+                elif not same_herd and 0 < dist < INTER_HERD_RADIUS:
+                    # Repel away from other-herd sheep (creates bubble between herds)
+                    repel_x -= ddx / dist
+                    repel_y -= ddy / dist
+                    rep_count += 1
+            if same_count > 0:
+                bx = bx * rand_w + (same_hx / same_count) * cohesion_w
+                by = by * rand_w + (same_hy / same_count) * cohesion_w
+            if rep_count > 0:
+                bx += (repel_x / rep_count) * INTER_HERD_REPULSION
+                by += (repel_y / rep_count) * INTER_HERD_REPULSION
 
         # 2. Gravitational pull toward herd center of mass
         if self.herd_id >= 0:
@@ -450,7 +453,7 @@ class Sheep:
     # ------------------------------------------------------------------
 
     def update(self, dt: float, grid: list, regrowth_timers: dict,
-               flock: list, new_sheep: list):
+               flock: list, new_sheep: list, dirty_callback=None):
         if not self.alive:
             return
 
@@ -500,6 +503,8 @@ class Sheep:
         if self.hunger >= HUNGER_THRESHOLD and on_grass:
             grid[row][col] = DIRT
             regrowth_timers[(row, col)] = REGROWTH_TIME
+            if dirty_callback:
+                dirty_callback(row, col)
             self._schedule_eat()
             return
 

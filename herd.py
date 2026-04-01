@@ -29,6 +29,11 @@ HERD_PROXIMITY      = 22.0   # tiles — max distance to be in the same herd
 REASSIGN_INTERVAL   = 10.0   # sim-seconds between flood-fill reassignments
 CURIOSITY_SWITCH    = 0.08   # base defection probability per reassignment cycle
 
+# Herd merging
+MERGE_TRIGGER_RADIUS = 10.0  # tiles — members this close make two herds merge-eligible
+MERGE_CHANCE         = 0.04  # probability of merge per eligible pair per reassignment
+GRASS_SNAP_RADIUS    = 35    # max tile radius searched when snapping CoG to grass
+
 # Gravitational pull toward herd center
 GRAVITY_MATURE      = 0.60   # pull weight for fully mature sheep
 GRAVITY_YOUNG       = 0.18   # pull weight for lambs / young adults
@@ -147,6 +152,7 @@ class HerdManager:
             herd_id += 1
 
         self._apply_curiosity_switches(animals, spatial, cell)
+        self._maybe_merge_herds(animals)
 
         # Build new herd dict, carrying over state from old herds where possible
         # (so migrations don't reset every reassignment)
@@ -203,6 +209,86 @@ class HerdManager:
                     break
 
     # ------------------------------------------------------------------
+    # Occasional herd merging
+    # ------------------------------------------------------------------
+
+    def _maybe_merge_herds(self, animals: list):
+        """Occasionally merge two herds whose members are very close together."""
+        by_herd: dict[int, list] = {}
+        for a in animals:
+            if a.herd_id >= 0:
+                by_herd.setdefault(a.herd_id, []).append(a)
+
+        herd_ids = list(by_herd.keys())
+        merged: set[int] = set()
+        thr_sq = MERGE_TRIGGER_RADIUS ** 2
+
+        for i in range(len(herd_ids)):
+            h1 = herd_ids[i]
+            if h1 in merged:
+                continue
+            for j in range(i + 1, len(herd_ids)):
+                h2 = herd_ids[j]
+                if h2 in merged or random.random() > MERGE_CHANCE:
+                    continue
+                m1 = by_herd[h1]
+                m2 = by_herd[h2]
+                close = any(
+                    (a1.tx - a2.tx) ** 2 + (a1.ty - a2.ty) ** 2 < thr_sq
+                    for a1 in m1[:5] for a2 in m2[:5]
+                )
+                if not close:
+                    continue
+                # Merge smaller herd into larger
+                if len(m1) >= len(m2):
+                    for a in m2:
+                        a.herd_id = h1
+                    merged.add(h2)
+                    by_herd[h1].extend(m2)
+                else:
+                    for a in m1:
+                        a.herd_id = h2
+                    merged.add(h1)
+                    by_herd[h2].extend(m1)
+                    break  # h1 consumed; advance outer loop
+
+    # ------------------------------------------------------------------
+    # Terrain helpers
+    # ------------------------------------------------------------------
+
+    def _nearest_grass_pt(self, cx: float, cy: float) -> tuple[float, float]:
+        """Return the nearest grass tile centre to (cx, cy).
+        Returns (cx, cy) unchanged if already on grass or no grass found."""
+        if self._grid is None:
+            return cx, cy
+        rows = len(self._grid)
+        cols = len(self._grid[0]) if rows else 0
+        ic, ir = int(cx), int(cy)
+        if 0 <= ir < rows and 0 <= ic < cols and self._grid[ir][ic] == GRASS:
+            return cx, cy
+        best_dist_sq = float('inf')
+        best_c, best_r = ic, ir
+        found = False
+        for radius in range(1, GRASS_SNAP_RADIUS + 1):
+            # Early exit: minimum dist at this ring is `radius`; if already found closer, stop
+            if found and radius * radius > best_dist_sq:
+                break
+            for dr in range(-radius, radius + 1):
+                for dc in range(-radius, radius + 1):
+                    if abs(dr) != radius and abs(dc) != radius:
+                        continue   # only the border ring
+                    r, c = ir + dr, ic + dc
+                    if 0 <= r < rows and 0 <= c < cols and self._grid[r][c] == GRASS:
+                        d = dr * dr + dc * dc
+                        if d < best_dist_sq:
+                            best_dist_sq = d
+                            best_c, best_r = c, r
+                            found = True
+        if found:
+            return float(best_c) + 0.5, float(best_r) + 0.5
+        return cx, cy
+
+    # ------------------------------------------------------------------
     # Per-frame herd state machine + attribute injection
     # ------------------------------------------------------------------
 
@@ -228,6 +314,10 @@ class HerdManager:
             data.cy         = cy
             data.avg_hunger = avg_h
             data.size       = n
+
+            # Snap the cohesion target to the nearest grass tile so the
+            # gravitational pull never drags the herd toward water/beach.
+            eff_cx, eff_cy = self._nearest_grass_pt(cx, cy)
 
             # --- State machine ---
             data.timer -= dt
@@ -265,8 +355,8 @@ class HerdManager:
             migrating  = (data.state == _HerdData.MIGRATING)
 
             for a in members:
-                a.herd_cx  = cx
-                a.herd_cy  = cy
+                a.herd_cx  = eff_cx
+                a.herd_cy  = eff_cy
                 a.migration_mode = migrating
                 a.migrate_dx     = data.mdx
                 a.migrate_dy     = data.mdy

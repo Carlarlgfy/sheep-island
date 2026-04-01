@@ -18,6 +18,7 @@ TILE_SIZE_DEFAULT = 14.0
 TILE_SIZE_MIN     = 2.0
 TILE_SIZE_MAX     = 48.0
 ZOOM_FACTOR       = 1.1   # multiplicative zoom per step
+ZOOM_LERP         = 14.0  # smooth zoom animation speed (higher = snappier)
 CAMERA_SPEED      = 55
 
 
@@ -166,6 +167,7 @@ def main():
     grass_spread     = None
     current_seed     = random.randint(0, 999_999)
     tile_size        = TILE_SIZE_DEFAULT
+    target_tile_size = TILE_SIZE_DEFAULT
     cam_x, cam_y     = 0.0, 0.0
     sheep_list: list[Sheep] = []
     sheep_tool       = False
@@ -205,14 +207,10 @@ def main():
 
                 if state == STATE_PLAY:
                     if event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
-                        new_size = min(TILE_SIZE_MAX, tile_size * ZOOM_FACTOR)
-                        cam_x, cam_y = zoom_camera(cam_x, cam_y, tile_size, new_size, screen_w, screen_h)
-                        tile_size = new_size
+                        target_tile_size = min(TILE_SIZE_MAX, target_tile_size * ZOOM_FACTOR)
 
                     elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
-                        new_size = max(TILE_SIZE_MIN, tile_size / ZOOM_FACTOR)
-                        cam_x, cam_y = zoom_camera(cam_x, cam_y, tile_size, new_size, screen_w, screen_h)
-                        tile_size = new_size
+                        target_tile_size = max(TILE_SIZE_MIN, target_tile_size / ZOOM_FACTOR)
 
                     elif event.key == pygame.K_ESCAPE:
                         state      = STATE_TITLE
@@ -221,11 +219,9 @@ def main():
 
             if event.type == pygame.MOUSEWHEEL and state == STATE_PLAY:
                 if event.y > 0:
-                    new_size = min(TILE_SIZE_MAX, tile_size * ZOOM_FACTOR)
+                    target_tile_size = min(TILE_SIZE_MAX, target_tile_size * ZOOM_FACTOR)
                 else:
-                    new_size = max(TILE_SIZE_MIN, tile_size / ZOOM_FACTOR)
-                cam_x, cam_y = zoom_camera(cam_x, cam_y, tile_size, new_size, screen_w, screen_h)
-                tile_size = new_size
+                    target_tile_size = max(TILE_SIZE_MIN, target_tile_size / ZOOM_FACTOR)
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                 if state == STATE_TITLE:
@@ -236,6 +232,7 @@ def main():
                         terrain_renderer = TerrainRenderer(grid)
                         grass_spread     = GrassSpread(grid)
                         tile_size        = TILE_SIZE_DEFAULT
+                        target_tile_size = TILE_SIZE_DEFAULT
                         cam_x            = max(0.0, (MAP_W * tile_size - screen_w) / 2)
                         cam_y            = max(0.0, (MAP_H * tile_size - screen_h) / 2)
                         sheep_list       = []
@@ -278,6 +275,15 @@ def main():
                                 if grid[row][col] != WATER:
                                     sheep_list.append(Sheep(world_x / ts, world_y / ts))
 
+        # --- Smooth zoom (animate tile_size toward target each frame) ---
+        if state == STATE_PLAY and abs(tile_size - target_tile_size) > 0.05:
+            old_size  = tile_size
+            tile_size += (target_tile_size - tile_size) * min(1.0, ZOOM_LERP * dt)
+            tile_size  = max(TILE_SIZE_MIN, min(TILE_SIZE_MAX, tile_size))
+            cam_x, cam_y = zoom_camera(cam_x, cam_y, old_size, tile_size, screen_w, screen_h)
+        elif state == STATE_PLAY:
+            tile_size = target_tile_size
+
         # --- Camera movement (held keys) ---
         if state == STATE_PLAY:
             speed = max(1.0, CAMERA_SPEED * tile_size / TILE_SIZE_DEFAULT)
@@ -303,7 +309,8 @@ def main():
 
             new_sheep: list[Sheep] = []
             for sheep in sheep_list:
-                sheep.update(dt_sim, grid, regrowth_timers, sheep_list, new_sheep)
+                sheep.update(dt_sim, grid, regrowth_timers, sheep_list, new_sheep,
+                             dirty_callback=terrain_renderer.mark_dirty)
             # Remove sheep that died this frame, then add all offspring
             sheep_list = [s for s in sheep_list if s.alive]
             sheep_list.extend(new_sheep)
@@ -315,12 +322,13 @@ def main():
                     r, c = pos
                     if 0 <= r < len(grid) and 0 <= c < len(grid[0]):
                         grid[r][c] = GRASS
+                        terrain_renderer.mark_dirty(r, c)
                     del regrowth_timers[pos]
 
             terrain_renderer.update(dt_sim)
 
             if grass_spread is not None:
-                grass_spread.update(dt_sim)
+                grass_spread.update(dt_sim, notify=terrain_renderer.mark_dirty)
 
         # --- Render ---
         if state == STATE_TITLE:
