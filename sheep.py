@@ -81,6 +81,9 @@ class Sheep:
 
     _sprites_raw: dict | None = None
     _cache: dict = {}
+    _avg_colors: dict = {}   # sprite key → (r, g, b) average sampled from 10×10 grid
+
+    LOD_THRESHOLD = 6.0   # tile_size below which we switch to flat-color dot
 
     def __init__(self, tile_x: float, tile_y: float, age: float = None,
                  genetic_size: float = None):
@@ -174,6 +177,26 @@ class Sheep:
             "eat_left":   eat_left,
         }
         cls._cache = {}
+        cls._avg_colors = {k: cls._sample_avg_color(v) for k, v in cls._sprites_raw.items()}
+
+    @classmethod
+    def _sample_avg_color(cls, surf: pygame.Surface) -> tuple:
+        """Sample a 10×10 grid of pixels, skip fully transparent ones, return (r,g,b)."""
+        w, h = surf.get_size()
+        xs = [int(w * (i + 0.5) / 10) for i in range(10)]
+        ys = [int(h * (j + 0.5) / 10) for j in range(10)]
+        r_sum = g_sum = b_sum = count = 0
+        for x in xs:
+            for y in ys:
+                color = surf.get_at((x, y))
+                if color.a > 32:   # skip mostly transparent pixels
+                    r_sum += color.r
+                    g_sum += color.g
+                    b_sum += color.b
+                    count += 1
+        if count == 0:
+            return (220, 220, 220)
+        return (r_sum // count, g_sum // count, b_sum // count)
 
     @classmethod
     def _scaled(cls, key: str, tile_size: float) -> pygame.Surface:
@@ -601,13 +624,23 @@ class Sheep:
     # ------------------------------------------------------------------
 
     def draw(self, screen: pygame.Surface, cam_x: float, cam_y: float, tile_size: float):
-        key    = f"eat_{self.facing}" if self.state == Sheep.EAT else self.facing
+        key          = f"eat_{self.facing}" if self.state == Sheep.EAT else self.facing
         effective_ts = tile_size * self.size_scale
+        ts           = max(1, round(tile_size))
+        sx_center    = int(self.tx * ts - cam_x)
+        sy_center    = int(self.ty * ts - cam_y)
+
+        # --- LOD: flat colored dot when zoomed far out ---
+        if tile_size < Sheep.LOD_THRESHOLD:
+            dot_r = max(1, round(effective_ts * 0.6))
+            color = self._avg_colors.get(key, (220, 220, 220))
+            pygame.draw.circle(screen, color, (sx_center, sy_center), dot_r)
+            return
+
         sprite = self._scaled(key, effective_ts)
-        ts     = max(1, round(tile_size))
         w, h   = sprite.get_size()
-        sx     = int(self.tx * ts - cam_x) - w // 2
-        sy     = int(self.ty * ts - cam_y) - h // 2
+        sx     = sx_center - w // 2
+        sy     = sy_center - h // 2
         screen.blit(sprite, (sx, sy))
 
         # Hunger bar (hidden when well-fed)
