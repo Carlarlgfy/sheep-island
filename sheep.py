@@ -121,8 +121,8 @@ class Sheep:
         self.herd_cy           = self.ty   # herd center y (tile coords)
         self.herd_pull_strength = 0.3      # cohesion weight toward center
         self.migration_mode    = False     # herd is migrating as one
-        self.migrate_dx        = 0.0      # migration direction x
-        self.migrate_dy        = 0.0      # migration direction y
+        self.migrate_tx        = self.tx  # migration target tile x
+        self.migrate_ty        = self.ty  # migration target tile y
 
         # Gestation
         self.pregnant        = False
@@ -231,13 +231,20 @@ class Sheep:
         self.state = Sheep.WALK
         self.timer = random.uniform(1.5, 4.0)
 
-        # --- Migration mode: follow herd direction with slight personal noise ---
+        # --- Migration mode: steer toward the herd's chosen grass target ---
         if self.migration_mode:
-            noise = random.gauss(0, 0.18)
-            angle_m = math.atan2(self.migrate_dy, self.migrate_dx) + noise
-            self.dx = math.cos(angle_m)
-            self.dy = math.sin(angle_m)
-            self._refresh_facing()
+            dtx = self.migrate_tx - self.tx
+            dty = self.migrate_ty - self.ty
+            dist_to_target = math.sqrt(dtx * dtx + dty * dty)
+            if dist_to_target > 1.5:
+                noise   = random.gauss(0, 0.18)
+                angle_m = math.atan2(dty, dtx) + noise
+                self.dx = math.cos(angle_m)
+                self.dy = math.sin(angle_m)
+                self._refresh_facing()
+            else:
+                # Arrived at target — idle briefly
+                self._schedule_idle()
             return
 
         # --- Base random direction ---

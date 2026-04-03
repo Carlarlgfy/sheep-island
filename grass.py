@@ -329,7 +329,7 @@ class TerrainRenderer:
 
 # Tiles converted per sim-second at 1× speed.
 # Scales with sim speed (3×, 8×) automatically.
-_SPREAD_RATE = 12
+_SPREAD_RATE = 8
 
 
 class GrassSpread:

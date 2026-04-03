@@ -59,7 +59,7 @@ HUNGER_MIGRATE_END       = 0.38   # avg hunger below this ends emergency migrati
 # ---------------------------------------------------------------------------
 
 class _HerdData:
-    __slots__ = ("cx", "cy", "state", "timer", "mdx", "mdy",
+    __slots__ = ("cx", "cy", "state", "timer", "mtx", "mty",
                  "avg_hunger", "size", "emergency")
 
     IDLE      = "idle"
@@ -71,8 +71,8 @@ class _HerdData:
         self.cy         = 0.0
         self.state      = _HerdData.IDLE
         self.timer      = random.uniform(MIGRATION_INTERVAL_MIN, MIGRATION_INTERVAL_MAX)
-        self.mdx        = 0.0
-        self.mdy        = 0.0
+        self.mtx        = 0.0   # migration target tile x
+        self.mty        = 0.0   # migration target tile y
         self.avg_hunger = 0.0
         self.size       = 0
         self.emergency  = False
@@ -178,8 +178,8 @@ class HerdManager:
                 nd = new_herds[best_new]
                 nd.state     = old_data.state
                 nd.timer     = old_data.timer
-                nd.mdx       = old_data.mdx
-                nd.mdy       = old_data.mdy
+                nd.mtx       = old_data.mtx
+                nd.mty       = old_data.mty
                 nd.emergency = old_data.emergency
                 transferred.add(best_new)
 
@@ -288,6 +288,90 @@ class HerdManager:
             return float(best_c) + 0.5, float(best_r) + 0.5
         return cx, cy
 
+    def _herd_awareness_radius(self, cx: float, cy: float,
+                               members: list) -> float:
+        """
+        Aggregate awareness radius: max distance from center to any member,
+        extended 20% beyond the outermost sheep so the herd has a loose vision
+        cone slightly larger than its physical spread.
+        """
+        if not members:
+            return HERD_PROXIMITY * 0.5
+        max_dist = 0.0
+        for a in members:
+            d = math.sqrt((a.tx - cx) ** 2 + (a.ty - cy) ** 2)
+            if d > max_dist:
+                max_dist = d
+        return max(10.0, max_dist * 1.2)
+
+    def _pick_migration_target(self, cx: float, cy: float,
+                               awareness_r: float) -> tuple[float, float]:
+        """
+        Sample 3–4 candidate patches spread evenly across 360°, each at
+        distance awareness_r×2 from the herd center.  Score each by the
+        number of grass tiles in a 5×5 window around the candidate.
+        Patches with no grass are heavily penalized when any other scanned
+        patch has grass.  Returns a (tx, ty) tile-coordinate target.
+        """
+        grid = self._grid
+        target_dist = max(20.0, awareness_r * 2.0)
+
+        if grid is None:
+            angle = random.uniform(0, 2 * math.pi)
+            return cx + math.cos(angle) * target_dist, cy + math.sin(angle) * target_dist
+
+        rows = len(grid)
+        cols = len(grid[0]) if rows else 0
+
+        n_candidates = random.randint(3, 4)
+        base_angle   = random.uniform(0, 2 * math.pi)
+        candidates   = []   # (px, py, grass_count)
+
+        for i in range(n_candidates):
+            angle = base_angle + i * (2 * math.pi / n_candidates)
+            angle += random.gauss(0, 0.15)
+
+            px = cx + math.cos(angle) * target_dist
+            py = cy + math.sin(angle) * target_dist
+            px = max(2.0, min(cols - 3.0, px))
+            py = max(2.0, min(rows - 3.0, py))
+
+            # Count grass in 5×5 patch
+            ipx, ipy = int(px), int(py)
+            grass_count = 0
+            for dr in range(-2, 3):
+                for dc in range(-2, 3):
+                    r, c = ipy + dr, ipx + dc
+                    if 0 <= r < rows and 0 <= c < cols and grid[r][c] == GRASS:
+                        grass_count += 1
+
+            candidates.append((px, py, grass_count))
+
+        # Build weights — heavily penalize zero-grass patches when alternatives exist
+        max_grass = max(g for _, _, g in candidates)
+        weights   = []
+        for _, _, gc in candidates:
+            if max_grass > 0 and gc == 0:
+                w = 0.02          # nearly impossible to choose a barren patch
+            elif max_grass == 0:
+                w = 1.0           # all equally unknown — pure random
+            else:
+                w = 0.1 + (gc / max_grass) * 2.0   # 0.1..2.1 proportional to density
+            weights.append(w)
+
+        # Weighted random pick
+        total_w    = sum(weights)
+        pick       = random.uniform(0, total_w)
+        cumulative = 0.0
+        chosen     = candidates[0]
+        for i, w in enumerate(weights):
+            cumulative += w
+            if pick <= cumulative:
+                chosen = candidates[i]
+                break
+
+        return chosen[0], chosen[1]
+
     # ------------------------------------------------------------------
     # Per-frame herd state machine + attribute injection
     # ------------------------------------------------------------------
@@ -335,8 +419,9 @@ class HerdManager:
 
             elif data.state == _HerdData.GATHERING:
                 if data.timer <= 0:
-                    data.mdx, data.mdy = self._pick_migration_dir(
-                        data.cx, data.cy, self._grid)
+                    awareness_r     = self._herd_awareness_radius(cx, cy, members)
+                    data.mtx, data.mty = self._pick_migration_target(
+                        data.cx, data.cy, awareness_r)
                     data.state = _HerdData.MIGRATING
                     data.timer = random.uniform(MIGRATION_DURATION_MIN,
                                                 MIGRATION_DURATION_MAX)
@@ -358,8 +443,8 @@ class HerdManager:
                 a.herd_cx  = eff_cx
                 a.herd_cy  = eff_cy
                 a.migration_mode = migrating
-                a.migrate_dx     = data.mdx
-                a.migrate_dy     = data.mdy
+                a.migrate_tx     = data.mtx
+                a.migrate_ty     = data.mty
 
                 if gathering:
                     # Strong pull toward center during gathering
@@ -370,54 +455,3 @@ class HerdManager:
                     a.herd_pull_strength = (GRAVITY_YOUNG
                                             + (GRAVITY_MATURE - GRAVITY_YOUNG) * age_frac)
 
-    # ------------------------------------------------------------------
-    # Terrain-aware migration direction
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _pick_migration_dir(cx: float, cy: float,
-                            grid: list) -> tuple[float, float]:
-        """
-        Sample 16 candidate directions; score each by how much grass/dirt
-        lies ahead and how little water.  Returns (dx, dy) unit vector.
-        """
-        if grid is None:
-            angle = random.uniform(0, 2 * math.pi)
-            return math.cos(angle), math.sin(angle)
-
-        rows = len(grid)
-        cols = len(grid[0]) if rows else 0
-
-        n_candidates = 16
-        best_angle = random.uniform(0, 2 * math.pi)
-        best_score = -9999
-
-        for i in range(n_candidates):
-            angle = i * (2 * math.pi / n_candidates)
-            adx   = math.cos(angle)
-            ady   = math.sin(angle)
-            score = 0
-
-            # Walk up to 35 tiles ahead, sampling every 3 tiles
-            for step in range(4, 36, 3):
-                nx = int(cx + adx * step)
-                ny = int(cy + ady * step)
-                if 0 <= ny < rows and 0 <= nx < cols:
-                    t = grid[ny][nx]
-                    if t == GRASS:
-                        score += 4
-                    elif t == DIRT:
-                        score += 2
-                    elif t == WATER:
-                        score -= 6   # strongly penalise water ahead
-                    # sand: score unchanged
-                else:
-                    score -= 4       # penalise heading off-map
-
-            if score > best_score:
-                best_score = score
-                best_angle = angle
-
-        # Small noise so herds don't all march in axis-aligned lines
-        best_angle += random.gauss(0, 0.15)
-        return math.cos(best_angle), math.sin(best_angle)
