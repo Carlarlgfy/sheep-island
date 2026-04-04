@@ -34,9 +34,9 @@ MERGE_TRIGGER_RADIUS = 10.0  # tiles — members this close make two herds merge
 MERGE_CHANCE         = 0.04  # probability of merge per eligible pair per reassignment
 GRASS_SNAP_RADIUS    = 35    # max tile radius searched when snapping CoG to grass
 
-# Gravitational pull toward herd center
-GRAVITY_MATURE      = 0.60   # pull weight for fully mature sheep
-GRAVITY_YOUNG       = 0.18   # pull weight for lambs / young adults
+# Gravitational pull toward herd center (stronger — tighter clustering)
+GRAVITY_MATURE      = 0.75   # pull weight for fully mature sheep (was 0.60)
+GRAVITY_YOUNG       = 0.22   # pull weight for lambs / young adults (was 0.18)
 MATURITY_GRAVITY_AGE = 270.0 # sim-secs at which full gravity kicks in
 
 # Parent bond
@@ -49,7 +49,7 @@ MIGRATION_INTERVAL_MAX  = 360.0
 GATHER_DURATION         = 18.0    # gathering phase before the herd moves
 MIGRATION_DURATION_MIN  = 50.0
 MIGRATION_DURATION_MAX  = 110.0
-GATHER_PULL_BOOST       = 0.95    # herd_pull_strength during gathering (overrides age calc)
+GATHER_PULL_BOOST       = 1.10    # herd_pull_strength during gathering (was 0.95)
 HUNGER_MIGRATE_THRESHOLD = 0.58   # avg herd hunger that triggers emergency migration
 HUNGER_MIGRATE_END       = 0.38   # avg hunger below this ends emergency migration
 

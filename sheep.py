@@ -10,14 +10,16 @@ _SHEEP_DIR = os.path.join(os.path.dirname(__file__), "sheep experiment")
 # ---------------------------------------------------------------------------
 # Hunger / eating
 # ---------------------------------------------------------------------------
-HUNGER_RATE              = 0.006   # base hunger drain per second
+HUNGER_RATE              = 0.014   # base hunger drain per second (high — forces migration)
 EAT_RATE                 = 0.22
 EAT_DURATION             = 3.5
 HUNGER_THRESHOLD         = 0.55
 HUNGER_URGENCY_THRESHOLD = 0.65
 STARVING_THRESHOLD       = 0.80
 HUNGER_DEATH             = 1.0
-REGROWTH_TIME            = 240.0
+REGROWTH_TIME            = 360.0   # longer regrowth puts more pressure on herds to migrate
+EAT_AREA_RADIUS          = 2       # tiles around eater also consumed (strips a patch)
+EAT_AREA_CHANCE          = 0.25    # probability each surrounding tile is eaten
 
 # ---------------------------------------------------------------------------
 # Lifespan  (extended)
@@ -26,13 +28,13 @@ LIFESPAN_MIN = 900.0    # 15 minutes
 LIFESPAN_MAX = 1800.0   # 30 minutes
 
 # ---------------------------------------------------------------------------
-# Herding / flocking
+# Herding / flocking  (tighter clustering — ~20% closer spacing)
 # ---------------------------------------------------------------------------
-HERD_COHESION_RADIUS = 22.0   # same-herd cohesion scan range
-SEPARATION_RADIUS    = 1.6
+HERD_COHESION_RADIUS = 18.0   # same-herd cohesion scan range (was 22 — tighter)
+SEPARATION_RADIUS    = 1.4    # minimum inter-sheep gap in tiles (was 1.6)
 SEPARATION_FORCE     = 1.4
-COHESION_WEIGHT      = 0.55   # nearby-flock cohesion weight
-SAME_HERD_WEIGHT     = 1.0    # multiplier on cohesion vector for same-herd members
+COHESION_WEIGHT      = 0.68   # nearby-flock cohesion weight (was 0.55 — stronger pull)
+SAME_HERD_WEIGHT     = 1.2    # multiplier on cohesion vector for same-herd members
 INTER_HERD_RADIUS    = 18.0   # radius within which other-herd sheep cause repulsion
 INTER_HERD_REPULSION = 0.35   # repulsion weight away from other-herd sheep
 FOLLOW_RADIUS        = 9.0
@@ -57,13 +59,16 @@ MATURITY_AGE = 90.0
 # Reproduction  (significantly slowed down)
 # ---------------------------------------------------------------------------
 REPRODUCE_RADIUS   = 10.0
-REPRODUCE_HUNGER   = 0.30
-REPRODUCE_COOLDOWN = 480.0   # was 120 — 8 min between matings
-BASE_LITTER        = 1       # was 2
+REPRODUCE_HUNGER   = 0.25    # must be less hungry to mate (was 0.30)
+REPRODUCE_COOLDOWN = 600.0   # 10 min between matings (was 480)
+BASE_LITTER        = 1
 
-# Gestation
-GESTATION_DURATION    = 90.0   # seconds from mating to birth
-GESTATION_HUNGER_MULT = 1.6    # pregnant sheep get hungry faster
+# Gestation — scales with litter size (more lambs = longer pregnancy + more hunger)
+GESTATION_BASE         = 180.0   # base seconds for 1 lamb (was 90)
+GESTATION_PER_LAMB     = 60.0    # extra seconds per additional lamb
+# Hunger multiplier: 2.0 for 1 lamb, +0.8 per additional lamb
+GESTATION_HUNGER_BASE  = 2.0
+GESTATION_HUNGER_SCALE = 0.8
 
 # ---------------------------------------------------------------------------
 # Genetics
@@ -119,15 +124,16 @@ class Sheep:
         # Herd influence — written by HerdManager every frame
         self.herd_cx           = self.tx   # herd center x (tile coords)
         self.herd_cy           = self.ty   # herd center y (tile coords)
-        self.herd_pull_strength = 0.3      # cohesion weight toward center
+        self.herd_pull_strength = 0.38     # cohesion weight toward center (was 0.3)
         self.migration_mode    = False     # herd is migrating as one
         self.migrate_tx        = self.tx  # migration target tile x
         self.migrate_ty        = self.ty  # migration target tile y
 
         # Gestation
-        self.pregnant        = False
-        self.gestation_timer = 0.0
+        self.pregnant                = False
+        self.gestation_timer         = 0.0
         self._pending_litter: list[tuple] = []   # (genetic_size, speed) per lamb
+        self._gestation_hunger_mult  = 1.0   # set when pregnancy begins
 
         self.alive     = True
         self.fertility = random.uniform(0.3, 1.0)
@@ -433,9 +439,13 @@ class Sheep:
             if dist > REPRODUCE_RADIUS:
                 continue
 
-            # 1 lamb normally; high-fertility sheep have a 25% chance of twins
+            # Litter size 1-4; higher fertility = more lambs (rare)
             litter_count = BASE_LITTER
-            if self.fertility > 0.8 and random.random() < 0.25:
+            if self.fertility > 0.7 and random.random() < 0.30:
+                litter_count += 1
+            if litter_count >= 2 and self.fertility > 0.85 and random.random() < 0.20:
+                litter_count += 1
+            if litter_count >= 3 and self.fertility > 0.95 and random.random() < 0.10:
                 litter_count += 1
 
             pending = []
@@ -450,9 +460,11 @@ class Sheep:
                                       mid_speed + random.gauss(0, 0.15)))
                 pending.append((baby_size, baby_speed))
 
-            self.pregnant        = True
-            self.gestation_timer = GESTATION_DURATION
-            self._pending_litter = pending
+            # Gestation and hunger scale with litter size
+            self.pregnant               = True
+            self.gestation_timer        = GESTATION_BASE + GESTATION_PER_LAMB * (litter_count - 1)
+            self._gestation_hunger_mult = GESTATION_HUNGER_BASE + GESTATION_HUNGER_SCALE * (litter_count - 1)
+            self._pending_litter        = pending
 
             self.reproduce_cooldown  = REPRODUCE_COOLDOWN
             other.reproduce_cooldown = REPRODUCE_COOLDOWN
@@ -500,8 +512,8 @@ class Sheep:
                 self.pregnant        = False
                 self._pending_litter = []
 
-        # Hunger — pregnant sheep get hungry faster
-        hunger_mult = GESTATION_HUNGER_MULT if self.pregnant else 1.0
+        # Hunger — pregnant sheep get hungry faster (multiplier scales with litter size)
+        hunger_mult = self._gestation_hunger_mult if self.pregnant else 1.0
         self.hunger = min(1.0, self.hunger + HUNGER_RATE * self.genetic_size * hunger_mult * dt)
 
         # --- Death checks ---
@@ -535,6 +547,19 @@ class Sheep:
             regrowth_timers[(row, col)] = REGROWTH_TIME
             if dirty_callback:
                 dirty_callback(row, col)
+            # Strip surrounding tiles — sheep graze an area, not just one tile
+            for dr in range(-EAT_AREA_RADIUS, EAT_AREA_RADIUS + 1):
+                for dc in range(-EAT_AREA_RADIUS, EAT_AREA_RADIUS + 1):
+                    if dr == 0 and dc == 0:
+                        continue
+                    nr, nc = row + dr, col + dc
+                    if (0 <= nr < rows and 0 <= nc < cols
+                            and grid[nr][nc] == GRASS
+                            and random.random() < EAT_AREA_CHANCE):
+                        grid[nr][nc] = DIRT
+                        regrowth_timers[(nr, nc)] = REGROWTH_TIME
+                        if dirty_callback:
+                            dirty_callback(nr, nc)
             self._schedule_eat()
             return
 
