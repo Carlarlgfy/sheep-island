@@ -34,14 +34,14 @@ MERGE_TRIGGER_RADIUS = 10.0  # tiles — members this close make two herds merge
 MERGE_CHANCE         = 0.04  # probability of merge per eligible pair per reassignment
 GRASS_SNAP_RADIUS    = 35    # max tile radius searched when snapping CoG to grass
 
-# Gravitational pull toward herd center (stronger — tighter clustering)
-GRAVITY_MATURE      = 0.75   # pull weight for fully mature sheep (was 0.60)
-GRAVITY_YOUNG       = 0.22   # pull weight for lambs / young adults (was 0.18)
-MATURITY_GRAVITY_AGE = 270.0 # sim-secs at which full gravity kicks in
+# Gravitational pull toward herd center
+GRAVITY_MATURE       = 0.75
+GRAVITY_YOUNG        = 0.22
+MATURITY_GRAVITY_AGE = 900.0  # sim-secs at which full gravity kicks in (matches new maturity base)
 
 # Parent bond
-PARENT_PULL         = 0.70   # extra pull weight toward parent for young sheep
-PARENT_AGE_CUTOFF   = 180.0  # sim-secs — bond fades linearly to zero by this age
+PARENT_PULL          = 0.70
+PARENT_AGE_CUTOFF    = 600.0  # 2 days — matches sheep.py
 
 # Gathering / migration state machine
 MIGRATION_INTERVAL_MIN  = 120.0   # sim-secs between normal migrations
@@ -49,9 +49,17 @@ MIGRATION_INTERVAL_MAX  = 360.0
 GATHER_DURATION         = 18.0    # gathering phase before the herd moves
 MIGRATION_DURATION_MIN  = 50.0
 MIGRATION_DURATION_MAX  = 110.0
-GATHER_PULL_BOOST       = 1.10    # herd_pull_strength during gathering (was 0.95)
-HUNGER_MIGRATE_THRESHOLD = 0.58   # avg herd hunger that triggers emergency migration
-HUNGER_MIGRATE_END       = 0.38   # avg hunger below this ends emergency migration
+GATHER_PULL_BOOST       = 1.10
+HUNGER_MIGRATE_THRESHOLD = 0.58
+HUNGER_MIGRATE_END       = 0.38
+
+# ---------------------------------------------------------------------------
+# Death-panic migration  (exponential urgency as herd members die)
+# ---------------------------------------------------------------------------
+DEATH_SCAN_RADIUS      = 35.0   # tile radius to count nearby corpses for panic
+DEATH_PANIC_SCALE      = 2.5    # exponential rate: panic = exp(deaths/herd * scale) - 1
+DEATH_PANIC_THRESHOLD  = 0.20   # panic level that begins cutting the idle timer
+DEATH_FLEE_DIST_MULT   = 3.0    # max extra distance multiplier at full panic (additive)
 
 
 # ---------------------------------------------------------------------------
@@ -60,22 +68,26 @@ HUNGER_MIGRATE_END       = 0.38   # avg hunger below this ends emergency migrati
 
 class _HerdData:
     __slots__ = ("cx", "cy", "state", "timer", "mtx", "mty",
-                 "avg_hunger", "size", "emergency")
+                 "avg_hunger", "size", "emergency",
+                 "nearby_deaths", "panic_level", "flee_dist_mult")
 
     IDLE      = "idle"
     GATHERING = "gathering"
     MIGRATING = "migrating"
 
     def __init__(self):
-        self.cx         = 0.0
-        self.cy         = 0.0
-        self.state      = _HerdData.IDLE
-        self.timer      = random.uniform(MIGRATION_INTERVAL_MIN, MIGRATION_INTERVAL_MAX)
-        self.mtx        = 0.0   # migration target tile x
-        self.mty        = 0.0   # migration target tile y
-        self.avg_hunger = 0.0
-        self.size       = 0
-        self.emergency  = False
+        self.cx              = 0.0
+        self.cy              = 0.0
+        self.state           = _HerdData.IDLE
+        self.timer           = random.uniform(MIGRATION_INTERVAL_MIN, MIGRATION_INTERVAL_MAX)
+        self.mtx             = 0.0
+        self.mty             = 0.0
+        self.avg_hunger      = 0.0
+        self.size            = 0
+        self.emergency       = False
+        self.nearby_deaths   = 0      # corpses within DEATH_SCAN_RADIUS of herd center
+        self.panic_level     = 0.0    # exp(death_ratio * scale) - 1
+        self.flee_dist_mult  = 1.0    # distance multiplier applied to migration target
 
 
 # ---------------------------------------------------------------------------
@@ -102,14 +114,16 @@ class HerdManager:
     def update(self, dt: float, animals: list, grid: list = None):
         if grid is not None:
             self._grid = grid
+        living  = [a for a in animals if getattr(a, 'dead_state', None) is None]
+        corpses = [a for a in animals if getattr(a, 'dead_state', None) is not None]
         self._timer -= dt
         if self._timer <= 0:
             self._timer = REASSIGN_INTERVAL
-            if animals:
-                self._reassign(animals)
+            if living:
+                self._reassign(living)
 
-        if animals:
-            self._update_herds(dt, animals)
+        if living:
+            self._update_herds(dt, living, corpses)
 
     # ------------------------------------------------------------------
     # Reassignment (flood-fill + curiosity defection)
@@ -305,16 +319,16 @@ class HerdManager:
         return max(10.0, max_dist * 1.2)
 
     def _pick_migration_target(self, cx: float, cy: float,
-                               awareness_r: float) -> tuple[float, float]:
+                               awareness_r: float,
+                               flee_mult: float = 1.0) -> tuple[float, float]:
         """
         Sample 3–4 candidate patches spread evenly across 360°, each at
-        distance awareness_r×2 from the herd center.  Score each by the
-        number of grass tiles in a 5×5 window around the candidate.
-        Patches with no grass are heavily penalized when any other scanned
-        patch has grass.  Returns a (tx, ty) tile-coordinate target.
+        distance awareness_r×2×flee_mult from the herd center.  Score each by
+        the number of grass tiles in a 5×5 window around the candidate.
+        flee_mult > 1 means the herd is fleeing deaths and should migrate farther.
         """
         grid = self._grid
-        target_dist = max(20.0, awareness_r * 2.0)
+        target_dist = max(20.0, awareness_r * 2.0) * flee_mult
 
         if grid is None:
             angle = random.uniform(0, 2 * math.pi)
@@ -376,12 +390,17 @@ class HerdManager:
     # Per-frame herd state machine + attribute injection
     # ------------------------------------------------------------------
 
-    def _update_herds(self, dt: float, animals: list):
+    def _update_herds(self, dt: float, animals: list, corpses: list = None):
+        if corpses is None:
+            corpses = []
+
         # Group by herd id
         by_herd: dict[int, list] = {}
         for a in animals:
             if a.herd_id >= 0:
                 by_herd.setdefault(a.herd_id, []).append(a)
+
+        scan_sq = DEATH_SCAN_RADIUS ** 2
 
         for hid, members in by_herd.items():
             data = self._herds.get(hid)
@@ -399,45 +418,62 @@ class HerdManager:
             data.avg_hunger = avg_h
             data.size       = n
 
-            # Snap the cohesion target to the nearest grass tile so the
-            # gravitational pull never drags the herd toward water/beach.
+            # --- Death-panic: count corpses near the herd center ---
+            nearby_deaths = sum(
+                1 for c in corpses
+                if (c.tx - cx) ** 2 + (c.ty - cy) ** 2 <= scan_sq
+            )
+            death_ratio        = nearby_deaths / max(1, n)
+            panic              = math.exp(death_ratio * DEATH_PANIC_SCALE) - 1.0
+            data.nearby_deaths = nearby_deaths
+            data.panic_level   = panic
+            # Distance multiplier: 1× normally, up to (1 + DEATH_FLEE_DIST_MULT)× at full panic
+            data.flee_dist_mult = 1.0 + min(panic, 3.0) * (DEATH_FLEE_DIST_MULT / 3.0)
+
+            # Snap the cohesion target to the nearest grass tile
             eff_cx, eff_cy = self._nearest_grass_pt(cx, cy)
 
             # --- State machine ---
             data.timer -= dt
 
             if data.state == _HerdData.IDLE:
+                # Death panic: cut idle timer exponentially — more deaths = faster departure
+                if panic >= DEATH_PANIC_THRESHOLD:
+                    max_wait = GATHER_DURATION / (1.0 + panic * 2.0)
+                    data.timer = min(data.timer, max_wait)
+
                 if avg_h >= HUNGER_MIGRATE_THRESHOLD and n >= 2:
-                    # Emergency migration — gather fast
                     data.state     = _HerdData.GATHERING
                     data.timer     = GATHER_DURATION * 0.4
                     data.emergency = True
                 elif data.timer <= 0:
                     data.state     = _HerdData.GATHERING
-                    data.timer     = GATHER_DURATION
-                    data.emergency = False
+                    data.timer     = GATHER_DURATION * max(0.3, 1.0 / (1.0 + panic))
+                    data.emergency = panic >= DEATH_PANIC_THRESHOLD
 
             elif data.state == _HerdData.GATHERING:
                 if data.timer <= 0:
-                    awareness_r     = self._herd_awareness_radius(cx, cy, members)
+                    awareness_r = self._herd_awareness_radius(cx, cy, members)
                     data.mtx, data.mty = self._pick_migration_target(
-                        data.cx, data.cy, awareness_r)
+                        data.cx, data.cy, awareness_r, flee_mult=data.flee_dist_mult)
                     data.state = _HerdData.MIGRATING
                     data.timer = random.uniform(MIGRATION_DURATION_MIN,
                                                 MIGRATION_DURATION_MAX)
 
             elif data.state == _HerdData.MIGRATING:
                 end_condition = (data.timer <= 0 or
-                                 (data.emergency and avg_h < HUNGER_MIGRATE_END))
+                                 (data.emergency and avg_h < HUNGER_MIGRATE_END
+                                  and panic < DEATH_PANIC_THRESHOLD))
                 if end_condition:
                     data.state     = _HerdData.IDLE
                     data.timer     = random.uniform(MIGRATION_INTERVAL_MIN,
                                                     MIGRATION_INTERVAL_MAX)
                     data.emergency = False
+                    data.flee_dist_mult = 1.0
 
             # --- Push attributes onto each member ---
-            gathering  = (data.state == _HerdData.GATHERING)
-            migrating  = (data.state == _HerdData.MIGRATING)
+            gathering = (data.state == _HerdData.GATHERING)
+            migrating = (data.state == _HerdData.MIGRATING)
 
             for a in members:
                 a.herd_cx  = eff_cx
@@ -447,10 +483,8 @@ class HerdManager:
                 a.migrate_ty     = data.mty
 
                 if gathering:
-                    # Strong pull toward center during gathering
                     a.herd_pull_strength = GATHER_PULL_BOOST
                 else:
-                    # Gravity scales with age: young sheep pull less, old more
                     age_frac = min(1.0, a.age / MATURITY_GRAVITY_AGE)
                     a.herd_pull_strength = (GRAVITY_YOUNG
                                             + (GRAVITY_MATURE - GRAVITY_YOUNG) * age_frac)

@@ -327,9 +327,9 @@ class TerrainRenderer:
 # Grass spreading (frontier BFS)
 # ---------------------------------------------------------------------------
 
-# Tiles converted per sim-second at 1× speed.
+# Tiles converted per sim-second at 1× speed (20% slower than original 8).
 # Scales with sim speed (3×, 8×) automatically.
-_SPREAD_RATE = 8
+_SPREAD_RATE = 6.4
 
 
 class GrassSpread:

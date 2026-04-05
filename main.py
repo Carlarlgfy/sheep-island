@@ -350,9 +350,11 @@ def main():
                 night_surf.set_alpha(alpha)
                 screen.blit(night_surf, (0, 0))
 
+            living_count = sum(1 for s in sheep_list
+                               if getattr(s, 'dead_state', None) is None)
             draw_play_ui(screen, font_ui, back_btn, sheep_btn, sheep_tool,
                          current_seed, tile_size, screen_w, screen_h, is_fullscreen,
-                         len(sheep_list), speed_btns, sim_speed_idx, day_number)
+                         living_count, speed_btns, sim_speed_idx, day_number)
 
             if sheep_tool and mouse_pos[1] < screen_h - BOTTOM_BAR_H:
                 mx, my = mouse_pos
