@@ -2,6 +2,7 @@ import pygame
 import sys
 import random
 import math
+import threading
 
 from mapgen import MapGenerator, WATER, SAND, DIRT, GRASS
 from sheep import Sheep
@@ -22,8 +23,9 @@ ZOOM_LERP         = 14.0  # smooth zoom animation speed (higher = snappier)
 CAMERA_SPEED      = 55
 
 
-STATE_TITLE = "title"
-STATE_PLAY  = "play"
+STATE_TITLE   = "title"
+STATE_LOADING = "loading"
+STATE_PLAY    = "play"
 
 DAY_CYCLE_DURATION = 300.0   # seconds for a full day/night cycle
 
@@ -52,6 +54,19 @@ def draw_title(screen, font_title, font_ui, buttons, screen_w, screen_h):
     for btn in buttons:
         draw_button(screen, btn, font_ui)
 
+
+
+def draw_loading(screen, font_title, font_ui, dot_count, sheep_surf,
+                 sheep_px, sheep_py, screen_w, screen_h):
+    screen.fill((18, 18, 36))
+    dots = "." * (dot_count + 1)   # cycles 1–3 dots
+    label = font_title.render(f"Loading{dots}", True, (240, 215, 90))
+    screen.blit(label, label.get_rect(center=(screen_w // 2, screen_h // 2 - 40)))
+    hint = font_ui.render("generating island…", True, (100, 100, 140))
+    screen.blit(hint, hint.get_rect(center=(screen_w // 2, screen_h // 2 + 30)))
+    if sheep_surf is not None:
+        w, h = sheep_surf.get_size()
+        screen.blit(sheep_surf, (int(sheep_px) - w // 2, int(sheep_py) - h // 2))
 
 
 def draw_play_ui(screen, font_ui, back_btn, sheep_btn, sheep_tool,
@@ -176,6 +191,23 @@ def main():
     day_number       = 1
     herd_manager     = HerdManager()
 
+    # Loading screen state
+    _gen_thread: threading.Thread | None = None
+    _gen_event:  threading.Event  | None = None
+    _gen_result: dict                    = {}
+    _loading_dot_count  = 0     # 0-2 cycling → 1-3 dots
+    _loading_dot_timer  = 0.0
+    # Simple loading sheep: position in pixels, direction, state timer
+    _lsheep_px   = 0.0
+    _lsheep_py   = 0.0
+    _lsheep_dx   = 1.0
+    _lsheep_dy   = 0.0
+    _lsheep_speed = 55.0        # pixels per second
+    _lsheep_timer = 0.0         # >0 = walking, ≤0 = grazing pause
+    _lsheep_grazing = False
+    _lsheep_facing  = "right"
+    _lsheep_surf: pygame.Surface | None = None
+
     # ---------------------------------------------------------------------------
     # Game loop
     # ---------------------------------------------------------------------------
@@ -227,21 +259,32 @@ def main():
                 if state == STATE_TITLE:
                     if gen_btn["rect"].collidepoint(mouse_pos):
                         current_seed = random.randint(0, 999_999)
-                        generator    = MapGenerator(MAP_W, MAP_H, seed=current_seed)
-                        grid             = generator.generate()
-                        terrain_renderer = TerrainRenderer(grid)
-                        grass_spread     = GrassSpread(grid)
-                        tile_size        = TILE_SIZE_DEFAULT
-                        target_tile_size = TILE_SIZE_DEFAULT
-                        cam_x            = max(0.0, (MAP_W * tile_size - screen_w) / 2)
-                        cam_y            = max(0.0, (MAP_H * tile_size - screen_h) / 2)
-                        sheep_list       = []
-                        sheep_tool       = False
-                        regrowth_timers  = {}
-                        time_of_day      = 0.0
-                        day_number       = 1
-                        herd_manager     = HerdManager()
-                        state            = STATE_PLAY
+                        _seed_for_thread = current_seed
+                        _gen_event  = threading.Event()
+                        _gen_result = {}
+
+                        def _do_generate(seed=_seed_for_thread, result=_gen_result,
+                                         ev=_gen_event):
+                            gen = MapGenerator(MAP_W, MAP_H, seed=seed)
+                            result['grid'] = gen.generate()
+                            ev.set()
+
+                        _gen_thread = threading.Thread(target=_do_generate, daemon=True)
+                        _gen_thread.start()
+
+                        # Set up loading sheep centered on screen
+                        _lsheep_px   = screen_w / 2.0
+                        _lsheep_py   = screen_h / 2.0 + 120
+                        angle0       = random.uniform(0, 2 * math.pi)
+                        _lsheep_dx   = math.cos(angle0)
+                        _lsheep_dy   = math.sin(angle0)
+                        _lsheep_timer   = random.uniform(1.5, 3.0)
+                        _lsheep_grazing = False
+                        _loading_dot_count = 0
+                        _loading_dot_timer = 0.0
+                        # Pre-scale loading sheep sprite
+                        _lsheep_surf = Sheep._scaled("right", 18.0)
+                        state = STATE_LOADING
 
                     elif quit_btn["rect"].collidepoint(mouse_pos):
                         pygame.quit()
@@ -274,6 +317,85 @@ def main():
                             if 0 <= row < rows and 0 <= col < cols:
                                 if grid[row][col] != WATER:
                                     sheep_list.append(Sheep(world_x / ts, world_y / ts))
+
+        # --- Loading state: animate dot text + wandering sheep; check thread ---
+        if state == STATE_LOADING:
+            _loading_dot_timer += dt
+            if _loading_dot_timer >= 0.45:
+                _loading_dot_timer = 0.0
+                _loading_dot_count = (_loading_dot_count + 1) % 3
+
+            # Update loading sheep
+            _lsheep_timer -= dt
+            if _lsheep_grazing:
+                # Occasionally cycle eating sprite
+                if _lsheep_timer <= 0:
+                    _lsheep_grazing = False
+                    angle_l = random.uniform(0, 2 * math.pi)
+                    _lsheep_dx = math.cos(angle_l)
+                    _lsheep_dy = math.sin(angle_l)
+                    _lsheep_timer = random.uniform(1.8, 3.5)
+                    _lsheep_facing = "right" if _lsheep_dx >= 0 else "left"
+                    eat_key = f"eat_{_lsheep_facing}"
+                    _lsheep_surf = Sheep._scaled(eat_key, 18.0)
+            else:
+                if _lsheep_timer <= 0:
+                    # Randomly pause and graze, or pick a new direction
+                    if random.random() < 0.35:
+                        _lsheep_grazing = True
+                        _lsheep_timer   = random.uniform(1.2, 2.5)
+                        eat_key = f"eat_{_lsheep_facing}"
+                        _lsheep_surf = Sheep._scaled(eat_key, 18.0)
+                    else:
+                        angle_l = random.uniform(0, 2 * math.pi)
+                        _lsheep_dx = math.cos(angle_l)
+                        _lsheep_dy = math.sin(angle_l)
+                        _lsheep_timer = random.uniform(1.5, 3.0)
+                        _lsheep_facing = "right" if _lsheep_dx >= 0 else "left"
+                        walk_key = _lsheep_facing
+                        _lsheep_surf = Sheep._scaled(walk_key, 18.0)
+                else:
+                    _lsheep_px += _lsheep_dx * _lsheep_speed * dt
+                    _lsheep_py += _lsheep_dy * _lsheep_speed * dt
+                    # Bounce off screen edges with a comfortable margin
+                    margin = 80
+                    if _lsheep_px < margin:
+                        _lsheep_px = margin
+                        _lsheep_dx = abs(_lsheep_dx)
+                        _lsheep_facing = "right"
+                        _lsheep_surf = Sheep._scaled("right", 18.0)
+                    elif _lsheep_px > screen_w - margin:
+                        _lsheep_px = screen_w - margin
+                        _lsheep_dx = -abs(_lsheep_dx)
+                        _lsheep_facing = "left"
+                        _lsheep_surf = Sheep._scaled("left", 18.0)
+                    if _lsheep_py < margin:
+                        _lsheep_py = margin
+                        _lsheep_dy = abs(_lsheep_dy)
+                    elif _lsheep_py > screen_h - margin:
+                        _lsheep_py = screen_h - margin
+                        _lsheep_dy = -abs(_lsheep_dy)
+
+            # Check if generation is done
+            if _gen_event is not None and _gen_event.is_set():
+                if _gen_thread is not None:
+                    _gen_thread.join()
+                    _gen_thread = None
+                grid             = _gen_result['grid']
+                terrain_renderer = TerrainRenderer(grid)
+                grass_spread     = GrassSpread(grid)
+                tile_size        = TILE_SIZE_DEFAULT
+                target_tile_size = TILE_SIZE_DEFAULT
+                cam_x            = max(0.0, (MAP_W * tile_size - screen_w) / 2)
+                cam_y            = max(0.0, (MAP_H * tile_size - screen_h) / 2)
+                sheep_list       = []
+                sheep_tool       = False
+                regrowth_timers  = {}
+                time_of_day      = 0.0
+                day_number       = 1
+                herd_manager     = HerdManager()
+                _gen_event       = None
+                state            = STATE_PLAY
 
         # --- Smooth zoom (animate tile_size toward target each frame) ---
         if state == STATE_PLAY and abs(tile_size - target_tile_size) > 0.05:
@@ -333,6 +455,11 @@ def main():
         # --- Render ---
         if state == STATE_TITLE:
             draw_title(screen, font_title, font_ui, title_buttons, screen_w, screen_h)
+
+        elif state == STATE_LOADING:
+            draw_loading(screen, font_title, font_ui,
+                         _loading_dot_count, _lsheep_surf,
+                         _lsheep_px, _lsheep_py, screen_w, screen_h)
 
         elif state == STATE_PLAY:
             screen.fill(WATER_COLOR)

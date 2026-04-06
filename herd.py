@@ -11,6 +11,7 @@ Each animal needs:
 
 HerdManager writes these attributes onto each animal every frame:
     .herd_cx, .herd_cy      — herd center of mass (tile coords)
+    .herd_awareness_r       — awareness radius of the herd (tile coords)
     .herd_pull_strength     — cohesion weight toward center (age-scaled; amplified when gathering)
     .migration_mode         — bool: herd is moving as one
     .migrate_dx/dy          — unit vector: direction of current migration
@@ -34,10 +35,14 @@ MERGE_TRIGGER_RADIUS = 5.0   # tiles — members this close make two herds merge
 MERGE_CHANCE         = 0.14  # probability of merge per eligible pair per reassignment
 GRASS_SNAP_RADIUS    = 35    # max tile radius searched when snapping CoG to grass
 
-# Gravitational pull toward herd center
-GRAVITY_MATURE       = 9.0
-GRAVITY_YOUNG        = 4.5
-MATURITY_GRAVITY_AGE = 900.0  # sim-secs at which full gravity kicks in (matches new maturity base)
+# Gravitational pull toward herd center — WAY stronger than before
+GRAVITY_MATURE       = 28.0   # was 9.0
+GRAVITY_YOUNG        = 14.0   # was 4.5
+MATURITY_GRAVITY_AGE = 900.0  # sim-secs at which full gravity kicks in
+
+# Hard boundary push: non-wanderers (curiosity < 0.3) beyond awareness radius
+# get this additional force per unit of excess distance fraction
+HERD_BOUNDARY_PUSH   = 90.0  # overwhelming force to snap strays back
 
 # Parent bond
 PARENT_PULL          = 0.70
@@ -49,15 +54,22 @@ MIGRATION_INTERVAL_MAX  = 1200.0
 GATHER_DURATION         = 18.0    # gathering phase before the herd moves
 MIGRATION_DURATION_MIN  = 50.0
 MIGRATION_DURATION_MAX  = 110.0
-GATHER_PULL_BOOST       = 14.0
+GATHER_PULL_BOOST       = 20.0    # was 14.0 — stronger gathering cohesion
 HUNGER_MIGRATE_THRESHOLD = 0.55
 HUNGER_MIGRATE_END       = 0.38
 
-# Grass scarcity migration trigger
+# Grass scarcity migration trigger — primary migration driver
 GRASS_MIGRATE_THRESHOLD = 0.25   # migrate when <25% of land in awareness radius is grass
 
+# Awareness radius cap — prevents the herd from tolerating already-dispersed sheep
+AWARENESS_R_CAP     = 20.0  # max awareness radius regardless of actual spread
+
+# Shared grazing patch — all herd members prefer eating here rather than scattering
+GRAZE_PATCH_RADIUS  = 14    # tile radius from herd center searched for best local grass
+GRAZE_REFRESH_TIME  = 6.0   # seconds between grazing patch recalculations
+
 # ---------------------------------------------------------------------------
-# Dirt-terrain migration  (move away when the local area is mostly bare dirt)
+# Dirt-terrain migration  (fallback: move away when local area is mostly bare dirt)
 # ---------------------------------------------------------------------------
 DIRT_SCAN_RADIUS       = 10     # tile radius inspected around herd center
 DIRT_MIGRATE_THRESHOLD = 0.65   # migrate when >65% of non-water/sand land is dirt
@@ -79,7 +91,8 @@ class _HerdData:
     __slots__ = ("cx", "cy", "state", "timer", "mtx", "mty",
                  "avg_hunger", "size", "emergency",
                  "nearby_deaths", "panic_level", "flee_dist_mult",
-                 "graze_dx", "graze_dy", "graze_timer")
+                 "awareness_r",
+                 "graze_cx", "graze_cy", "graze_refresh")
 
     IDLE      = "idle"
     GATHERING = "gathering"
@@ -98,11 +111,10 @@ class _HerdData:
         self.nearby_deaths   = 0      # corpses within DEATH_SCAN_RADIUS of herd center
         self.panic_level     = 0.0    # exp(death_ratio * scale) - 1
         self.flee_dist_mult  = 1.0    # distance multiplier applied to migration target
-        # Grazing march direction (unit vector); re-evaluated when grass runs out ahead
-        angle = random.uniform(0, 2 * math.pi)
-        self.graze_dx        = math.cos(angle)
-        self.graze_dy        = math.sin(angle)
-        self.graze_timer     = random.uniform(GRAZE_TIMER_MIN, GRAZE_TIMER_MAX)
+        self.awareness_r     = 20.0   # herd awareness radius (updated every frame)
+        self.graze_cx        = 0.0    # shared grazing patch center x (tile coords)
+        self.graze_cy        = 0.0    # shared grazing patch center y (tile coords)
+        self.graze_refresh   = 0.0    # countdown to next grazing patch recalculation
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +126,8 @@ class HerdManager:
     Two-phase update:
       1. Every REASSIGN_INTERVAL: flood-fill proximity grouping + curiosity defection.
       2. Every frame: compute center-of-mass, tick state machines, push
-         herd_cx/cy/migration_mode/migrate_dx/dy/herd_pull_strength onto each animal.
+         herd_cx/cy/herd_awareness_r/migration_mode/migrate_dx/dy/herd_pull_strength
+         onto each animal.
     """
 
     def __init__(self):
@@ -184,7 +197,6 @@ class HerdManager:
         self._maybe_merge_herds(animals)
 
         # Build new herd dict, carrying over state from old herds where possible
-        # (so migrations don't reset every reassignment)
         new_herds: dict[int, _HerdData] = {}
         for a in animals:
             if a.herd_id not in new_herds:
@@ -210,9 +222,6 @@ class HerdManager:
                 nd.mtx        = old_data.mtx
                 nd.mty        = old_data.mty
                 nd.emergency  = old_data.emergency
-                nd.graze_dx   = old_data.graze_dx
-                nd.graze_dy   = old_data.graze_dy
-                nd.graze_timer = old_data.graze_timer
                 transferred.add(best_new)
 
         self._herds = new_herds
@@ -302,7 +311,6 @@ class HerdManager:
         best_c, best_r = ic, ir
         found = False
         for radius in range(1, GRASS_SNAP_RADIUS + 1):
-            # Early exit: minimum dist at this ring is `radius`; if already found closer, stop
             if found and radius * radius > best_dist_sq:
                 break
             for dr in range(-radius, radius + 1):
@@ -334,7 +342,8 @@ class HerdManager:
             d = math.sqrt((a.tx - cx) ** 2 + (a.ty - cy) ** 2)
             if d > max_dist:
                 max_dist = d
-        return max(10.0, max_dist * 1.2)
+        # Cap at AWARENESS_R_CAP so a dispersed herd doesn't grow tolerant of its own spread
+        return max(10.0, min(AWARENESS_R_CAP, max_dist * 1.2))
 
     def _pick_migration_target(self, cx: float, cy: float,
                                awareness_r: float,
@@ -404,70 +413,66 @@ class HerdManager:
 
         return chosen[0], chosen[1]
 
-    def _pick_graze_direction(self, cx: float, cy: float) -> tuple[float, float]:
-        """Return a unit vector pointing toward the most grass-rich area near the herd."""
+    def _pick_graze_patch(self, cx: float, cy: float,
+                          awareness_r: float) -> tuple[float, float]:
+        """Find the grass-richest small patch within GRAZE_PATCH_RADIUS of the herd center.
+        Returns the tile coords of the best patch center, or (cx, cy) if no grass found."""
         if self._grid is None:
-            angle = random.uniform(0, 2 * math.pi)
-            return math.cos(angle), math.sin(angle)
+            return cx, cy
+        grid = self._grid
+        rows = len(grid)
+        cols = len(grid[0]) if rows else 0
+        ic, ir = int(cx), int(cy)
+        scan = min(GRAZE_PATCH_RADIUS, int(awareness_r))
+        best_score = -1.0
+        best_c, best_r = ic, ir
 
-        rows = len(self._grid)
-        cols = len(self._grid[0]) if rows else 0
-        scan_r = 4
+        for dr in range(-scan, scan + 1):
+            for dc in range(-scan, scan + 1):
+                if dr * dr + dc * dc > scan * scan:
+                    continue
+                r, c = ir + dr, ic + dc
+                if not (0 <= r < rows and 0 <= c < cols):
+                    continue
+                # Count grass in a 3×3 window around candidate
+                grass = 0
+                for ddr in range(-1, 2):
+                    for ddc in range(-1, 2):
+                        rr, cc = r + ddr, c + ddc
+                        if 0 <= rr < rows and 0 <= cc < cols and grid[rr][cc] == GRASS:
+                            grass += 1
+                if grass == 0:
+                    continue
+                # Prefer patches closer to herd center (distance penalty)
+                dist_norm = math.sqrt(dr * dr + dc * dc) / max(1, scan)
+                score = grass - dist_norm * 3.0
+                if score > best_score:
+                    best_score = score
+                    best_c, best_r = c, r
 
-        best_grass = -1
-        best_angle = random.uniform(0, 2 * math.pi)
+        return float(best_c) + 0.5, float(best_r) + 0.5
 
-        for i in range(8):
-            angle = i * (math.pi / 4.0) + random.gauss(0, 0.12)
-            px = cx + math.cos(angle) * GRAZE_CHECK_DIST
-            py = cy + math.sin(angle) * GRAZE_CHECK_DIST
-            px = max(2.0, min(cols - 3.0, px))
-            py = max(2.0, min(rows - 3.0, py))
-            ipx, ipy = int(px), int(py)
-            grass_count = 0
-            for dr in range(-scan_r, scan_r + 1):
-                for dc in range(-scan_r, scan_r + 1):
-                    r, c = ipy + dr, ipx + dc
-                    if 0 <= r < rows and 0 <= c < cols and self._grid[r][c] == GRASS:
-                        grass_count += 1
-            if grass_count > best_grass:
-                best_grass = grass_count
-                best_angle = angle
-
-        return math.cos(best_angle), math.sin(best_angle)
-
-    def _graze_dir_has_grass(self, cx: float, cy: float,
-                              dx: float, dy: float) -> bool:
-        """Return True if there is grass ahead in the current grazing direction."""
+    def _count_grass_fraction_in_awareness(self, cx: float, cy: float,
+                                           awareness_r: float) -> float:
+        """Return the fraction of land tiles within awareness_r that are grass.
+        Returns 1.0 (no concern) when grid is unavailable."""
         if self._grid is None:
-            return True
-        rows = len(self._grid)
-        cols = len(self._grid[0]) if rows else 0
-        px = cx + dx * GRAZE_CHECK_DIST
-        py = cy + dy * GRAZE_CHECK_DIST
-        ipx, ipy = int(px), int(py)
-        for dr in range(-4, 5):
-            for dc in range(-4, 5):
-                r, c = ipy + dr, ipx + dc
-                if 0 <= r < rows and 0 <= c < cols and self._grid[r][c] == GRASS:
-                    return True
-        return False
-
-    def _mostly_dirt(self, cx: float, cy: float) -> bool:
-        """Return True when the area around (cx, cy) is mostly bare dirt (low grass)."""
-        if self._grid is None:
-            return False
+            return 1.0
         rows = len(self._grid)
         cols = len(self._grid[0]) if rows else 0
         ic, ir = int(cx), int(cy)
-        r = DIRT_SCAN_RADIUS
+        r = max(1, int(awareness_r))
         land = grass = 0
+        r_sq = r * r
         for dr in range(-r, r + 1):
+            ro = ir + dr
+            if not (0 <= ro < rows):
+                continue
             for dc in range(-r, r + 1):
-                if dr * dr + dc * dc > r * r:
+                if dr * dr + dc * dc > r_sq:
                     continue
-                ro, co = ir + dr, ic + dc
-                if not (0 <= ro < rows and 0 <= co < cols):
+                co = ic + dc
+                if not (0 <= co < cols):
                     continue
                 t = self._grid[ro][co]
                 if t == WATER or t == SAND:
@@ -476,8 +481,8 @@ class HerdManager:
                 if t == GRASS:
                     grass += 1
         if land == 0:
-            return False
-        return (grass / land) < (1.0 - DIRT_MIGRATE_THRESHOLD)
+            return 1.0
+        return grass / land
 
     # ------------------------------------------------------------------
     # Per-frame herd state machine + attribute injection
@@ -511,6 +516,10 @@ class HerdManager:
             data.avg_hunger = avg_h
             data.size       = n
 
+            # Compute awareness radius every frame
+            awareness_r = self._herd_awareness_radius(cx, cy, members)
+            data.awareness_r = awareness_r
+
             # --- Death-panic: count corpses near the herd center ---
             nearby_deaths = sum(
                 1 for c in corpses
@@ -520,46 +529,49 @@ class HerdManager:
             panic              = math.exp(death_ratio * DEATH_PANIC_SCALE) - 1.0
             data.nearby_deaths = nearby_deaths
             data.panic_level   = panic
-            # Distance multiplier: 1× normally, up to (1 + DEATH_FLEE_DIST_MULT)× at full panic
             data.flee_dist_mult = 1.0 + min(panic, 3.0) * (DEATH_FLEE_DIST_MULT / 3.0)
 
-            # Snap the cohesion target to the nearest grass tile
-            eff_cx, eff_cy = self._nearest_grass_pt(cx, cy)
+            # Social cohesion target = raw center of mass (NOT snapped to grass).
+            # Snapping to grass made the social center food-driven and unstable.
+            # Grass-seeking is now handled separately via the grazing patch below.
+            eff_cx, eff_cy = cx, cy
+
+            # Refresh shared grazing patch periodically
+            data.graze_refresh -= dt
+            if data.graze_refresh <= 0:
+                data.graze_cx, data.graze_cy = self._pick_graze_patch(cx, cy, awareness_r)
+                data.graze_refresh = GRAZE_REFRESH_TIME
+            # Initialise graze patch on first frame (both coords are 0.0)
+            if data.graze_cx == 0.0 and data.graze_cy == 0.0:
+                data.graze_cx, data.graze_cy = self._pick_graze_patch(cx, cy, awareness_r)
 
             # --- State machine ---
             data.timer -= dt
 
             if data.state == _HerdData.IDLE:
-                # Tick grazing march direction — re-evaluate when grass runs out ahead
-                data.graze_timer -= dt
-                if (data.graze_timer <= 0
-                        or not self._graze_dir_has_grass(cx, cy,
-                                                          data.graze_dx, data.graze_dy)):
-                    data.graze_dx, data.graze_dy = self._pick_graze_direction(cx, cy)
-                    data.graze_timer = random.uniform(GRAZE_TIMER_MIN, GRAZE_TIMER_MAX)
-
-                # Death panic: cut idle timer exponentially — more deaths = faster departure
+                # Death panic: cut idle timer exponentially
                 if panic >= DEATH_PANIC_THRESHOLD:
                     max_wait = GATHER_DURATION / (1.0 + panic * 2.0)
                     data.timer = min(data.timer, max_wait)
 
-                if avg_h >= HUNGER_MIGRATE_THRESHOLD and n >= 2:
+                # Primary migration trigger: grass scarcity within awareness radius
+                grass_frac = self._count_grass_fraction_in_awareness(cx, cy, awareness_r)
+                if grass_frac < GRASS_MIGRATE_THRESHOLD and n >= 2:
+                    data.state     = _HerdData.GATHERING
+                    data.timer     = GATHER_DURATION * 0.5
+                    data.emergency = True
+                elif avg_h >= HUNGER_MIGRATE_THRESHOLD and n >= 2:
                     data.state     = _HerdData.GATHERING
                     data.timer     = GATHER_DURATION * 0.4
                     data.emergency = True
-                elif n >= 2 and self._mostly_dirt(cx, cy):
-                    # Area is mostly bare dirt — relocate even if not urgently hungry
-                    data.state     = _HerdData.GATHERING
-                    data.timer     = GATHER_DURATION * 0.6
-                    data.emergency = False
                 elif data.timer <= 0:
+                    # Fallback time-based migration (very rare)
                     data.state     = _HerdData.GATHERING
                     data.timer     = GATHER_DURATION * max(0.3, 1.0 / (1.0 + panic))
                     data.emergency = panic >= DEATH_PANIC_THRESHOLD
 
             elif data.state == _HerdData.GATHERING:
                 if data.timer <= 0:
-                    awareness_r = self._herd_awareness_radius(cx, cy, members)
                     data.mtx, data.mty = self._pick_migration_target(
                         data.cx, data.cy, awareness_r, flee_mult=data.flee_dist_mult)
                     data.state = _HerdData.MIGRATING
@@ -582,14 +594,14 @@ class HerdManager:
             migrating = (data.state == _HerdData.MIGRATING)
 
             for a in members:
-                a.herd_cx        = eff_cx
-                a.herd_cy        = eff_cy
-                a.migration_mode = migrating
-                a.migrate_tx     = data.mtx
-                a.migrate_ty     = data.mty
-                a.herd_graze_dx  = data.graze_dx
-                a.herd_graze_dy  = data.graze_dy
-                a.herd_grazing   = (data.state == _HerdData.IDLE)
+                a.herd_cx          = eff_cx
+                a.herd_cy          = eff_cy
+                a.herd_graze_cx    = data.graze_cx
+                a.herd_graze_cy    = data.graze_cy
+                a.herd_awareness_r = awareness_r
+                a.migration_mode   = migrating
+                a.migrate_tx       = data.mtx
+                a.migrate_ty       = data.mty
 
                 if gathering:
                     a.herd_pull_strength = GATHER_PULL_BOOST
@@ -597,4 +609,3 @@ class HerdManager:
                     age_frac = min(1.0, a.age / MATURITY_GRAVITY_AGE)
                     a.herd_pull_strength = (GRAVITY_YOUNG
                                             + (GRAVITY_MATURE - GRAVITY_YOUNG) * age_frac)
-
