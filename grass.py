@@ -56,6 +56,8 @@ def _blend(a: tuple, b: tuple, t: float) -> tuple:
     )
 
 
+CHUNK_SIZE = 16   # tiles per chunk side for the high-zoom cache
+
 # ---------------------------------------------------------------------------
 # TerrainRenderer
 # ---------------------------------------------------------------------------
@@ -94,6 +96,11 @@ class TerrainRenderer:
         self._map_surf: pygame.Surface | None = None
         self._dirty: set[tuple[int, int]] = set()
 
+        # --- Chunk cache for high-zoom rendering ---
+        self._chunk_cache: dict = {}          # (chunk_r, chunk_c) → Surface at _last_ts
+        self._dirty_chunks: set = set()       # chunks needing eviction on next update
+        self._last_ts: int = 0                # ts at which chunks were rendered
+
     # ------------------------------------------------------------------
     # Cached surface helpers
     # ------------------------------------------------------------------
@@ -101,6 +108,11 @@ class TerrainRenderer:
     def mark_dirty(self, row: int, col: int):
         """Call whenever a tile's terrain type changes (eaten, regrown, etc.)."""
         self._dirty.add((row, col))
+        # Invalidate this chunk + immediate neighbors (borders read adjacent tiles)
+        cr, cc = row // CHUNK_SIZE, col // CHUNK_SIZE
+        for dcr in range(-1, 2):
+            for dcc in range(-1, 2):
+                self._dirty_chunks.add((cr + dcr, cc + dcc))
 
     def _build_map_surf(self):
         """Build the 1px-per-tile cached surface using run-length encoded rows."""
@@ -144,14 +156,19 @@ class TerrainRenderer:
 
     def update(self, dt: float):
         self._wave_t += dt
-        # Apply pending tile changes to the cached surface
-        if self._map_surf is not None and self._dirty:
-            rows = len(self.grid)
-            cols = len(self.grid[0]) if rows else 0
-            for (r, c) in self._dirty:
-                if 0 <= r < rows and 0 <= c < cols:
-                    self._map_surf.set_at((c, r), BASE_COLORS[self.grid[r][c]])
+        # Apply pending tile changes to the low-zoom cached surface
+        if self._dirty:
+            if self._map_surf is not None:
+                rows = len(self.grid)
+                cols = len(self.grid[0]) if rows else 0
+                for (r, c) in self._dirty:
+                    if 0 <= r < rows and 0 <= c < cols:
+                        self._map_surf.set_at((c, r), BASE_COLORS[self.grid[r][c]])
             self._dirty.clear()
+        # Evict stale high-zoom chunk cache entries
+        for key in self._dirty_chunks:
+            self._chunk_cache.pop(key, None)
+        self._dirty_chunks.clear()
 
     # ------------------------------------------------------------------
     # Main draw
@@ -173,29 +190,66 @@ class TerrainRenderer:
             self._draw_cached(screen, cam_x, cam_y, screen_w, screen_h, rows, cols, ts)
             return
 
-        start_col = max(0, cx // ts)
-        start_row = max(0, cy // ts)
-        end_col   = min(cols, start_col + screen_w // ts + 2)
-        end_row   = min(rows, start_row + screen_h // ts + 2)
+        # --- Chunk-based rendering: pre-render 16×16 tile blocks, blit each chunk ---
+        # Clear the whole chunk cache whenever the tile_size rounds to a new pixel value
+        if ts != self._last_ts:
+            self._chunk_cache.clear()
+            self._last_ts = ts
 
+        chunk_px   = CHUNK_SIZE * ts
+        start_cc   = max(0, cx // chunk_px)
+        start_cr   = max(0, cy // chunk_px)
+        end_cc     = min((cols - 1) // CHUNK_SIZE + 1, start_cc + screen_w // chunk_px + 2)
+        end_cr     = min((rows - 1) // CHUNK_SIZE + 1, start_cr + screen_h // chunk_px + 2)
+
+        for cr in range(start_cr, end_cr):
+            for cc in range(start_cc, end_cc):
+                key = (cr, cc)
+                if key not in self._chunk_cache:
+                    self._chunk_cache[key] = self._render_chunk(cr, cc, ts, rows, cols)
+                screen.blit(self._chunk_cache[key],
+                            (cc * chunk_px - cx, cr * chunk_px - cy))
+
+        # Evict off-screen chunks to keep memory bounded (keep visible + 1-chunk border)
+        if len(self._chunk_cache) > 120:
+            for key in list(self._chunk_cache):
+                if not (start_cr - 1 <= key[0] <= end_cr
+                        and start_cc - 1 <= key[1] <= end_cc):
+                    del self._chunk_cache[key]
+
+    # ------------------------------------------------------------------
+    # Chunk renderer  (called once per chunk per zoom level, then cached)
+    # ------------------------------------------------------------------
+
+    def _render_chunk(self, chunk_r: int, chunk_c: int, ts: int,
+                      rows: int, cols: int) -> pygame.Surface:
+        """Render a CHUNK_SIZE×CHUNK_SIZE block of tiles into an off-screen Surface."""
+        chunk_px   = CHUNK_SIZE * ts
+        surf       = pygame.Surface((chunk_px, chunk_px))
+        surf.fill(BASE_COLORS[WATER])
         do_texture = ts >= 8
         do_borders = ts >= 3
+        grid       = self.grid
 
-        for row in range(start_row, end_row):
-            for col in range(start_col, end_col):
+        for dr in range(CHUNK_SIZE):
+            row = chunk_r * CHUNK_SIZE + dr
+            if row >= rows:
+                break
+            for dc in range(CHUNK_SIZE):
+                col = chunk_c * CHUNK_SIZE + dc
+                if col >= cols:
+                    break
                 terrain = grid[row][col]
-                sx = col * ts - cx
-                sy = row * ts - cy
-                color = self._tile_color(terrain, col, row)
-
-                pygame.draw.rect(screen, color, (sx, sy, ts, ts))
-
+                sx      = dc * ts
+                sy      = dr * ts
+                color   = self._tile_color(terrain, col, row)
+                pygame.draw.rect(surf, color, (sx, sy, ts, ts))
                 if do_texture:
-                    self._draw_texture(screen, terrain, col, row, sx, sy, ts)
-
+                    self._draw_texture(surf, terrain, col, row, sx, sy, ts)
                 if do_borders:
-                    self._draw_borders(screen, grid, terrain, col, row,
+                    self._draw_borders(surf, grid, terrain, col, row,
                                        sx, sy, ts, rows, cols, color)
+        return surf
 
     # ------------------------------------------------------------------
     # Colour helpers
@@ -329,7 +383,7 @@ class TerrainRenderer:
 
 # Tiles converted per sim-second at 1× speed (20% slower than original 8).
 # Scales with sim speed (3×, 8×) automatically.
-_SPREAD_RATE = 6.4
+_SPREAD_RATE = 5.76
 
 
 class GrassSpread:

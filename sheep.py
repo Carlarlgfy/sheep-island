@@ -5,21 +5,28 @@ import os
 
 from mapgen import WATER, GRASS, DIRT
 
-_SHEEP_DIR = os.path.join(os.path.dirname(__file__), "sheep experiment")
+_SHEEP_DIR = os.path.join(os.path.dirname(__file__), "white sheep")
 
 # ---------------------------------------------------------------------------
 # Hunger / eating  (+15% baseline hunger rate)
 # ---------------------------------------------------------------------------
 HUNGER_RATE              = 0.01610  # 15% higher than original 0.014
-EAT_RATE                 = 0.22
-EAT_DURATION             = 3.5
+EAT_RATE                 = 0.10
+EAT_DURATION             = 20.0   # sheep graze slowly — long eating sessions
 HUNGER_THRESHOLD         = 0.55
 HUNGER_URGENCY_THRESHOLD = 0.65
 STARVING_THRESHOLD       = 0.80
-HUNGER_DEATH             = 1.0
 REGROWTH_TIME            = 432.0   # 20% slower regrowth; more pressure on herds to migrate
-EAT_AREA_RADIUS          = 2       # tiles around eater also consumed (strips a patch)
-EAT_AREA_CHANCE          = 0.25    # probability each surrounding tile is eaten
+
+# ---------------------------------------------------------------------------
+# HP
+# ---------------------------------------------------------------------------
+HP_MIN           = 10
+HP_MAX           = 25
+# HP drain per sim-second at full hunger (linear from 0 at hunger=0.5 to this at hunger=1.0)
+HP_DRAIN_RATE    = 1.0 / 30.0
+# HP restored per sim-second while actively eating
+HP_EAT_REGEN     = 0.3
 
 # ---------------------------------------------------------------------------
 # Death / corpse
@@ -35,10 +42,10 @@ FERTILIZE_RADIUS         = 3       # tile radius of fertilizer effect when corps
 FERTILIZE_REGROWTH       = 60.0    # fast regrowth time (seconds) on fertilized tiles
 
 # ---------------------------------------------------------------------------
-# Lifespan  (10–18 days with heritable variation)
+# Lifespan  (13–21 days with heritable variation; +3 days average vs. old 10–18)
 # ---------------------------------------------------------------------------
-LIFESPAN_MIN           = 3000.0   # 10 days
-LIFESPAN_MAX           = 5400.0   # 18 days
+LIFESPAN_MIN           = 3900.0   # 13 days
+LIFESPAN_MAX           = 6300.0   # 21 days
 GENETIC_LIFESPAN_RANGE = 0.10     # ±10% heritable modifier; offspring inherit parent value
 
 # ---------------------------------------------------------------------------
@@ -48,17 +55,30 @@ MATURITY_AGE_BASE        = 900.0   # 3-day midpoint (range: 600–1200 s)
 GENETIC_MATURITY_RANGE   = 0.33    # ±33% → 2–4 day phenotype range
 
 # ---------------------------------------------------------------------------
-# Herding / flocking  (tighter clustering — ~20% closer spacing)
+# Herding / flocking  (very tight clustering — sheep stay close together)
 # ---------------------------------------------------------------------------
-HERD_COHESION_RADIUS = 18.0
-SEPARATION_RADIUS    = 1.4
+HERD_COHESION_RADIUS = 5.0
+SEPARATION_RADIUS    = 1.2
 SEPARATION_FORCE     = 1.4
-COHESION_WEIGHT      = 0.68
-SAME_HERD_WEIGHT     = 1.2
-INTER_HERD_RADIUS    = 18.0
+COHESION_WEIGHT      = 3.5
+SAME_HERD_WEIGHT     = 8.0
+INTER_HERD_RADIUS    = 10.0
 INTER_HERD_REPULSION = 0.35
-FOLLOW_RADIUS        = 9.0
-FOLLOW_CHANCE        = 0.35
+FOLLOW_RADIUS        = 6.0
+FOLLOW_CHANCE        = 0.50
+
+# ---------------------------------------------------------------------------
+# Grazing march
+# ---------------------------------------------------------------------------
+GRAZE_HUNGER_THRESHOLD = 0.18   # eat grass while slowly marching even if not very hungry
+GRAZE_SPEED_MULT       = 0.18   # grazing pace is a slow creep (~0.55–1.1 tiles/sec)
+GRAZE_IDLE_MAX         = 1.2    # max idle duration during grazing (much shorter than normal)
+
+# ---------------------------------------------------------------------------
+# Wanderer drift  (isolated sheep very slowly seek other isolated sheep)
+# ---------------------------------------------------------------------------
+WANDERER_ATTRACT_RADIUS = 80.0   # tile radius within which a wanderer notices others
+WANDERER_DRIFT_WEIGHT   = 0.08   # very weak directional bias — barely perceptible
 
 # Parent bond
 PARENT_PULL_WEIGHT   = 0.65
@@ -74,8 +94,8 @@ MATE_SEARCH_RADIUS = 20.0
 # Reproduction
 # ---------------------------------------------------------------------------
 REPRODUCE_RADIUS   = 10.0
-REPRODUCE_HUNGER   = 0.25
-REPRODUCE_COOLDOWN = 900.0   # 3 days between matings
+REPRODUCE_HUNGER   = 0.35    # raised from 0.25 so sheep can mate even when somewhat hungry
+REPRODUCE_COOLDOWN = 600.0   # 2 days between matings (was 3)
 BASE_LITTER        = 1
 
 # Gestation  (2–3 days base, heritable, lengthened by poor nutrition)
@@ -110,7 +130,8 @@ class Sheep:
                  genetic_size: float = None,
                  genetic_maturity: float = None,
                  genetic_lifespan: float = None,
-                 genetic_gestation: float = None):
+                 genetic_gestation: float = None,
+                 genetic_hp: int = None):
         self.tx = float(tile_x)
         self.ty = float(tile_y)
         self.dx = 0.0
@@ -145,6 +166,12 @@ class Sheep:
                                   else random.uniform(1.0 - GENETIC_GESTATION_RANGE,
                                                       1.0 + GENETIC_GESTATION_RANGE))
 
+        # HP — genetic integer (HP_MIN..HP_MAX); more HP = more hunger per tick
+        self.genetic_hp = (int(max(HP_MIN, min(HP_MAX, genetic_hp)))
+                           if genetic_hp is not None
+                           else random.randint(HP_MIN, HP_MAX))
+        self.hp = float(self.genetic_hp)
+
         # Derive per-sheep timing from genetics
         self.maturity_age = MATURITY_AGE_BASE * self.genetic_maturity
         self.lifespan     = random.uniform(LIFESPAN_MIN, LIFESPAN_MAX) * self.genetic_lifespan
@@ -158,7 +185,11 @@ class Sheep:
 
         self.infertile = random.random() < 0.001
         self.genius    = random.random() < 0.001
-        self.curiosity = random.uniform(0.0, 1.0)   # 0=homebodies, 1=wanderers
+        # 97% homebodies, ~3% true wanderers — keeps herds intact
+        if random.random() < 0.03:
+            self.curiosity = random.uniform(0.7, 1.0)
+        else:
+            self.curiosity = random.uniform(0.0, 0.06)
 
         # Herd membership (assigned by HerdManager)
         self.herd_id = -1
@@ -167,12 +198,15 @@ class Sheep:
         self.parent: "Sheep | None" = None
 
         # Herd influence — written by HerdManager every frame
-        self.herd_cx           = self.tx   # herd center x (tile coords)
-        self.herd_cy           = self.ty   # herd center y (tile coords)
-        self.herd_pull_strength = 0.38     # cohesion weight toward center (was 0.3)
-        self.migration_mode    = False     # herd is migrating as one
-        self.migrate_tx        = self.tx  # migration target tile x
-        self.migrate_ty        = self.ty  # migration target tile y
+        self.herd_cx            = self.tx   # herd center x (tile coords)
+        self.herd_cy            = self.ty   # herd center y (tile coords)
+        self.herd_pull_strength = 0.38
+        self.migration_mode     = False     # herd is migrating as one
+        self.migrate_tx         = self.tx   # migration target tile x
+        self.migrate_ty         = self.ty   # migration target tile y
+        self.herd_graze_dx      = 0.0       # herd's current slow grazing direction
+        self.herd_graze_dy      = 0.0
+        self.herd_grazing       = False     # True when herd is in idle/grazing state
 
         # Gestation
         self.pregnant                = False
@@ -298,7 +332,11 @@ class Sheep:
         self.state = Sheep.IDLE
         self.dx    = 0.0
         self.dy    = 0.0
-        self.timer = random.uniform(2.0, 5.0)
+        # During a grazing march the herd is always moving — keep idle pauses short
+        if self.herd_grazing and self.herd_id >= 0:
+            self.timer = random.uniform(0.3, GRAZE_IDLE_MAX)
+        else:
+            self.timer = random.uniform(2.0, 5.0)
 
     def _schedule_eat(self):
         self.state = Sheep.EAT
@@ -322,9 +360,20 @@ class Sheep:
                 self.dy = math.sin(angle_m)
                 self._refresh_facing()
             else:
-                # Arrived at target — idle briefly
                 self._schedule_idle()
             return
+
+        # --- Grazing march: herd in idle state — follow the shared grazing direction ---
+        if self.herd_grazing and self.herd_id >= 0:
+            mag_g = math.sqrt(self.herd_graze_dx ** 2 + self.herd_graze_dy ** 2)
+            if mag_g > 0:
+                noise   = random.gauss(0, 0.10)
+                angle_g = math.atan2(self.herd_graze_dy, self.herd_graze_dx) + noise
+                self.dx = math.cos(angle_g)
+                self.dy = math.sin(angle_g)
+                self.timer = random.uniform(2.0, 5.0)  # longer walk steps while grazing
+                self._refresh_facing()
+                return
 
         # --- Base random direction ---
         angle = random.uniform(0, 2 * math.pi)
@@ -359,7 +408,6 @@ class Sheep:
                     same_hy += (ddy / dist) * SAME_HERD_WEIGHT
                     same_count += 1
                 elif not same_herd and 0 < dist < INTER_HERD_RADIUS:
-                    # Repel away from other-herd sheep (creates bubble between herds)
                     repel_x -= ddx / dist
                     repel_y -= ddy / dist
                     rep_count += 1
@@ -379,11 +427,16 @@ class Sheep:
             gcy = self.herd_cy - self.ty
             dist_c = math.sqrt(gcx * gcx + gcy * gcy)
             if dist_c > 0:
-                # Pull scales with distance (far sheep pulled harder)
-                # and is reduced by curiosity (wanderers resist the pull)
                 pull = min(self.herd_pull_strength,
                            self.herd_pull_strength * dist_c / (HERD_COHESION_RADIUS * 0.6))
                 pull *= (1.0 - self.curiosity * 0.50)
+                # During grazing march, hunger barely weakens cohesion — sheep stay together
+                if self.herd_grazing and self.herd_id >= 0:
+                    hunger_resist = 0.0
+                else:
+                    hunger_resist = max(0.0,
+                        (self.hunger - HUNGER_THRESHOLD) / (1.0 - HUNGER_THRESHOLD))
+                pull *= (1.0 - hunger_resist * 0.35)
                 bx += (gcx / dist_c) * pull
                 by += (gcy / dist_c) * pull
 
@@ -399,6 +452,25 @@ class Sheep:
                 pw   = PARENT_PULL_WEIGHT * fade
                 bx  += (pdx / pdist) * pw
                 by  += (pdy / pdist) * pw
+
+        # 4. Wanderer drift: isolated sheep very slowly attract each other
+        if self.herd_id == -1 and self.curiosity > 0.5 and flock:
+            nearest_dist = WANDERER_ATTRACT_RADIUS * WANDERER_ATTRACT_RADIUS
+            wdx, wdy = 0.0, 0.0
+            for other in flock:
+                if other is self or other.herd_id != -1 or other.dead_state is not None:
+                    continue
+                ddx = other.tx - self.tx
+                ddy = other.ty - self.ty
+                d_sq = ddx * ddx + ddy * ddy
+                if d_sq < nearest_dist and d_sq > 0:
+                    nearest_dist = d_sq
+                    d = math.sqrt(d_sq)
+                    wdx = ddx / d
+                    wdy = ddy / d
+            if nearest_dist < WANDERER_ATTRACT_RADIUS * WANDERER_ATTRACT_RADIUS:
+                bx += wdx * WANDERER_DRIFT_WEIGHT
+                by += wdy * WANDERER_DRIFT_WEIGHT
 
         mag = math.sqrt(bx * bx + by * by)
         if mag > 0:
@@ -556,7 +628,9 @@ class Sheep:
                 baby_maturity  = _inherit(self, other, "genetic_maturity",  GENETIC_MATURITY_RANGE)
                 baby_lifespan  = _inherit(self, other, "genetic_lifespan",  GENETIC_LIFESPAN_RANGE)
                 baby_gestation = _inherit(self, other, "genetic_gestation", GENETIC_GESTATION_RANGE)
-                pending.append((baby_size, baby_speed, baby_maturity, baby_lifespan, baby_gestation))
+                baby_hp = int(round(max(HP_MIN, min(HP_MAX,
+                    (self.genetic_hp + other.genetic_hp) / 2.0 + random.gauss(0, 1.5)))))
+                pending.append((baby_size, baby_speed, baby_maturity, baby_lifespan, baby_gestation, baby_hp))
 
             # Gestation time: genetic base × nutrition stress of the mother
             # Poor nutrition extends pregnancy (fewer resources for foetal development)
@@ -576,7 +650,7 @@ class Sheep:
         """Spawn pending offspring when gestation completes."""
         rows = len(grid)
         cols = len(grid[0]) if rows else 0
-        for baby_size, baby_speed, baby_maturity, baby_lifespan, baby_gestation in self._pending_litter:
+        for baby_size, baby_speed, baby_maturity, baby_lifespan, baby_gestation, baby_hp in self._pending_litter:
             attempts = 0
             while attempts < 8:
                 attempts += 1
@@ -588,7 +662,8 @@ class Sheep:
                                  genetic_size=baby_size,
                                  genetic_maturity=baby_maturity,
                                  genetic_lifespan=baby_lifespan,
-                                 genetic_gestation=baby_gestation)
+                                 genetic_gestation=baby_gestation,
+                                 genetic_hp=baby_hp)
                     baby.hunger   = 0.0
                     baby.speed    = baby_speed
                     baby.herd_id  = self.herd_id
@@ -676,16 +751,22 @@ class Sheep:
                 self.pregnant        = False
                 self._pending_litter = []
 
-        # Hunger — pregnant sheep get hungry faster (multiplier scales with litter size)
-        hunger_mult = self._gestation_hunger_mult if self.pregnant else 1.0
-        self.hunger = min(1.0, self.hunger + HUNGER_RATE * self.genetic_size * hunger_mult * dt)
+        # Hunger doesn't increase while actively eating
+        if self.state != Sheep.EAT:
+            hunger_mult    = self._gestation_hunger_mult if self.pregnant else 1.0
+            hp_hunger_mult = 1.0 + (self.genetic_hp - HP_MIN) * 0.01
+            self.hunger = min(1.0, self.hunger + HUNGER_RATE * self.genetic_size * hp_hunger_mult * hunger_mult * dt)
 
         # Nutrition stress: exponential moving average over ~1 sim-day window
         alpha = dt / DAY_DURATION
         self._avg_hunger += (self.hunger - self._avg_hunger) * min(1.0, alpha)
 
+        # HP drains only when hunger is completely maxed — sheep with food barely lose HP
+        if self.hunger >= 1.0:
+            self.hp = max(0.0, self.hp - HP_DRAIN_RATE * dt)
+
         # --- Death checks ---
-        if self.age >= self._effective_lifespan or self.hunger >= HUNGER_DEATH:
+        if self.age >= self._effective_lifespan or self.hp <= 0:
             self._die()
             return
 
@@ -705,25 +786,40 @@ class Sheep:
         # --- EAT ---
         if self.state == Sheep.EAT:
             self.hunger = max(0.0, self.hunger - EAT_RATE * dt)
+            self.hp = min(float(self.genetic_hp), self.hp + HP_EAT_REGEN * dt)
             if self.timer <= 0 or self.hunger <= 0.1:
                 self._schedule_idle()
             return
 
-        # Start eating immediately if standing on grass and hungry
-        if self.hunger >= HUNGER_THRESHOLD and on_grass:
+        # Start eating if on grass — lower threshold during grazing march
+        eat_threshold = (GRAZE_HUNGER_THRESHOLD
+                         if (self.herd_grazing and self.herd_id >= 0)
+                         else HUNGER_THRESHOLD)
+        if self.hunger >= eat_threshold and on_grass:
+            # Always eat current tile
             grid[row][col] = DIRT
             regrowth_timers[(row, col)] = REGROWTH_TIME
             if dirty_callback:
                 dirty_callback(row, col)
-            # Strip surrounding tiles — sheep graze an area, not just one tile
-            for dr in range(-EAT_AREA_RADIUS, EAT_AREA_RADIUS + 1):
-                for dc in range(-EAT_AREA_RADIUS, EAT_AREA_RADIUS + 1):
-                    if dr == 0 and dc == 0:
-                        continue
-                    nr, nc = row + dr, col + dc
-                    if (0 <= nr < rows and 0 <= nc < cols
-                            and grid[nr][nc] == GRASS
-                            and random.random() < EAT_AREA_CHANCE):
+            # Extra tiles eaten based on body size:
+            #   bottom 20% (size < 0.91) → 1 tile total (0 extras)
+            #   lower-middle (0.91–1.015) → 2 tiles (1 extra)
+            #   upper-middle (1.015–1.12) → 3 tiles (2 extras)
+            #   top 10% (size >= 1.12)   → 4 tiles (3 extras)
+            s = self.genetic_size
+            if s < 0.91:
+                n_extra = 0
+            elif s < 1.015:
+                n_extra = 1
+            elif s < 1.12:
+                n_extra = 2
+            else:
+                n_extra = 3
+            if n_extra > 0:
+                neighbors = [(row, col + 1), (row + 1, col), (row + 1, col + 1)]
+                random.shuffle(neighbors)
+                for nr, nc in neighbors[:n_extra]:
+                    if (0 <= nr < rows and 0 <= nc < cols and grid[nr][nc] == GRASS):
                         grid[nr][nc] = DIRT
                         regrowth_timers[(nr, nc)] = REGROWTH_TIME
                         if dirty_callback:
@@ -805,6 +901,9 @@ class Sheep:
         if self.state == Sheep.WALK:
             sx, sy = self._separation_delta(flock, dt)
             speed_mult = 1.0 + urgency * 1.8
+            # Slow creep during grazing march (unless urgently hungry or migrating)
+            if self.herd_grazing and self.herd_id >= 0 and not self.migration_mode and not starving:
+                speed_mult *= GRAZE_SPEED_MULT
             new_tx = self.tx + self.dx * self.speed * speed_mult * dt + sx
             new_ty = self.ty + self.dy * self.speed * speed_mult * dt + sy
 
