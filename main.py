@@ -6,6 +6,7 @@ import threading
 
 from mapgen import MapGenerator, WATER, SAND, DIRT, GRASS
 from sheep import Sheep
+from ram import Ram
 from grass import TerrainRenderer, GrassSpread, WATER_COLOR
 from herd import HerdManager
 
@@ -71,16 +72,18 @@ def draw_loading(screen, font_title, font_ui, dot_count, sheep_surf,
 
 def draw_play_ui(screen, font_ui, back_btn, sheep_btn, sheep_tool,
                  seed, tile_size, screen_w, screen_h, is_fullscreen, population,
-                 speed_btns, sim_speed_idx, day_number):
+                 speed_btns, sim_speed_idx, day_number, ram_count=0):
     bar_rect = pygame.Rect(0, screen_h - BOTTOM_BAR_H, screen_w, BOTTOM_BAR_H)
     pygame.draw.rect(screen, (30, 30, 30), bar_rect)
 
     sheep_btn["color"] = (60, 140, 60) if sheep_tool else (70, 70, 110)
     draw_button(screen, sheep_btn, font_ui)
 
+    ewe_count = population - ram_count
     fs_hint = "F11: windowed" if is_fullscreen else "F11: fullscreen"
     hint = font_ui.render(
-        f"Day {day_number}   Seed: {seed}   Zoom: {round(tile_size)}px   Sheep: {population}   "
+        f"Day {day_number}   Seed: {seed}   Zoom: {round(tile_size)}px   "
+        f"Sheep: {ewe_count}♀ {ram_count}♂   "
         f"WASD: move   Scroll/+/-: zoom   {fs_hint}",
         True, (160, 160, 160),
     )
@@ -163,6 +166,7 @@ def main():
     is_fullscreen = False
 
     Sheep.load_sprites()
+    Ram.load_sprites()
 
     font_title = pygame.font.SysFont("Arial", 72, bold=True)
     font_ui    = pygame.font.SysFont("Arial", 20)
@@ -316,7 +320,10 @@ def main():
                             cols    = len(grid[0]) if rows else 0
                             if 0 <= row < rows and 0 <= col < cols:
                                 if grid[row][col] != WATER:
-                                    sheep_list.append(Sheep(world_x / ts, world_y / ts))
+                                    if random.random() < 0.25:
+                                        sheep_list.append(Ram(world_x / ts, world_y / ts))
+                                    else:
+                                        sheep_list.append(Sheep(world_x / ts, world_y / ts))
 
         # --- Loading state: animate dot text + wandering sheep; check thread ---
         if state == STATE_LOADING:
@@ -428,6 +435,7 @@ def main():
                 day_number += 1
 
             herd_manager.update(dt_sim, sheep_list, grid)
+            Ram.update_fights(dt_sim)
 
             new_sheep: list[Sheep] = []
             for sheep in sheep_list:
@@ -477,11 +485,13 @@ def main():
                 night_surf.set_alpha(alpha)
                 screen.blit(night_surf, (0, 0))
 
-            living_count = sum(1 for s in sheep_list
-                               if getattr(s, 'dead_state', None) is None)
+            living        = [s for s in sheep_list if getattr(s, 'dead_state', None) is None]
+            living_count  = len(living)
+            ram_count     = sum(1 for s in living if isinstance(s, Ram))
             draw_play_ui(screen, font_ui, back_btn, sheep_btn, sheep_tool,
                          current_seed, tile_size, screen_w, screen_h, is_fullscreen,
-                         living_count, speed_btns, sim_speed_idx, day_number)
+                         living_count, speed_btns, sim_speed_idx, day_number,
+                         ram_count=ram_count)
 
             if sheep_tool and mouse_pos[1] < screen_h - BOTTOM_BAR_H:
                 mx, my = mouse_pos

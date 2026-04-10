@@ -102,7 +102,14 @@ GESTATION_HUNGER_SCALE = 0.8
 # ---------------------------------------------------------------------------
 # Genetics
 # ---------------------------------------------------------------------------
-GENETIC_SIZE_RANGE   = 0.15
+GENETIC_SIZE_RANGE     = 0.15
+GENETIC_STRENGTH_RANGE = 0.20   # heritable combat / body strength (dormant for ewes)
+MALE_BIRTH_CHANCE      = 0.25   # fraction of offspring that are male
+
+# ---------------------------------------------------------------------------
+# Offspring factory — overridden by ram.py to enable Ram births
+# ---------------------------------------------------------------------------
+_OFFSPRING_FACTORY = None   # callable(ox, oy, sex, **kwargs) -> Sheep | Ram
 
 # Social attraction — 1 (lone wolf) to 10 (inseparable herd-bound).
 # Controls cohesion pull strength, boundary return, and grazing patch radius.
@@ -131,7 +138,8 @@ class Sheep:
                  genetic_lifespan: float = None,
                  genetic_gestation: float = None,
                  genetic_hp: int = None,
-                 genetic_social: int = None):
+                 genetic_social: int = None,
+                 genetic_strength: float = None):
         self.tx = float(tile_x)
         self.ty = float(tile_y)
         self.dx = 0.0
@@ -178,6 +186,15 @@ class Sheep:
         self.genetic_social = (int(max(1, min(10, genetic_social)))
                                if genetic_social is not None
                                else max(1, min(10, round(random.gauss(7.5, 1.5)))))
+
+        # Strength — heritable; used by rams in combat, dormant for ewes.
+        self.genetic_strength = (_clamp_genetic(genetic_strength, GENETIC_STRENGTH_RANGE)
+                                 if genetic_strength is not None
+                                 else random.uniform(1.0 - GENETIC_STRENGTH_RANGE,
+                                                     1.0 + GENETIC_STRENGTH_RANGE))
+
+        # Sex — "female" for base Sheep; overridden to "male" by Ram.
+        self.sex = "female"
 
         # Derive per-sheep timing from genetics
         self.maturity_age = MATURITY_AGE_BASE * self.genetic_maturity
@@ -262,6 +279,11 @@ class Sheep:
         """Nutrition-stressed sheep age faster — chronic hunger reduces lifespan by up to 25%."""
         stress = self._avg_hunger * 0.25
         return self.lifespan * max(0.75, 1.0 - stress)
+
+    @property
+    def _hunger_rate_mult(self) -> float:
+        """Multiplier on base hunger accumulation rate.  Ram overrides to 0.95."""
+        return 1.0
 
     # ------------------------------------------------------------------
     # Sprite loading and per-tile-size caching
@@ -489,6 +511,9 @@ class Sheep:
     # Herd helpers
     # ------------------------------------------------------------------
 
+    # Radius within which bystanders avoid an active ram fight (written by ram.py)
+    _FIGHT_EXCLUSION_RADIUS = 5.0
+
     def _separation_delta(self, flock: list, dt: float):
         sx, sy = 0.0, 0.0
         for other in flock:
@@ -503,7 +528,20 @@ class Sheep:
                     strength = (CORPSE_AVERSION_RADIUS - dist) / CORPSE_AVERSION_RADIUS
                     sx += (ddx / dist) * strength * CORPSE_AVERSION_FORCE * dt
                     sy += (ddy / dist) * strength * CORPSE_AVERSION_FORCE * dt
-            elif 0 < dist < SEPARATION_RADIUS:
+                continue
+            # Fight exclusion — bystanders drift ≥5 tiles from active fighters.
+            # A stray that wanders inside 1.5 tiles of a fighter may take minor damage.
+            if getattr(other, 'ram_state', None) == 'fighting':
+                excl_r = Sheep._FIGHT_EXCLUSION_RADIUS
+                if 0 < dist < excl_r:
+                    strength = (excl_r - dist) / excl_r
+                    sx += (ddx / dist) * strength * 3.0 * dt
+                    sy += (ddy / dist) * strength * 3.0 * dt
+                    # Accidental contact damage (very close)
+                    if dist < 1.5 and self.dead_state is None:
+                        self.hp = max(0.0, self.hp - 0.5 * dt)
+                continue
+            if 0 < dist < SEPARATION_RADIUS:
                 strength = (SEPARATION_RADIUS - dist) / SEPARATION_RADIUS
                 sx += (ddx / dist) * strength * SEPARATION_FORCE * dt
                 sy += (ddy / dist) * strength * SEPARATION_FORCE * dt
@@ -655,6 +693,9 @@ class Sheep:
         for other in flock:
             if other is self or other.dead_state is not None or not other.is_adult or other.infertile or other.pregnant:
                 continue
+            # Require opposite sex (same sex = no pairing; unknown sex defaults to "female")
+            if getattr(other, 'sex', 'female') == self.sex:
+                continue
             if other.hunger >= other._reproduce_threshold or other.reproduce_cooldown > 0:
                 continue
             ddx  = other.tx - self.tx
@@ -674,10 +715,15 @@ class Sheep:
     # ------------------------------------------------------------------
 
     def _try_reproduce(self, flock: list, grid: list, new_sheep: list):
+        if self.sex == "male":      # males don't carry pregnancies
+            return
         if self.infertile or self.pregnant:
             return
         for other in flock:
             if other is self or other.dead_state is not None or not other.is_adult or other.infertile or other.pregnant:
+                continue
+            # Require opposite sex
+            if getattr(other, 'sex', 'female') == self.sex:
                 continue
             if other.hunger >= other._reproduce_threshold or other.reproduce_cooldown > 0:
                 continue
@@ -717,7 +763,13 @@ class Sheep:
                     (self.genetic_hp + other.genetic_hp) / 2.0 + random.gauss(0, 1.5)))))
                 baby_social = max(1, min(10, round(
                     (self.genetic_social + other.genetic_social) / 2.0 + random.gauss(0, 0.8))))
-                pending.append((baby_size, baby_speed, baby_maturity, baby_lifespan, baby_gestation, baby_hp, baby_social))
+                baby_strength = max(1.0 - GENETIC_STRENGTH_RANGE,
+                                    min(1.0 + GENETIC_STRENGTH_RANGE,
+                                        (self.genetic_strength + other.genetic_strength) / 2.0
+                                        + random.gauss(0, GENETIC_STRENGTH_RANGE * 0.12)))
+                baby_sex = "male" if random.random() < MALE_BIRTH_CHANCE else "female"
+                pending.append((baby_size, baby_speed, baby_maturity, baby_lifespan,
+                                baby_gestation, baby_hp, baby_social, baby_strength, baby_sex))
 
             # Gestation time: genetic base × nutrition stress of the mother
             # Poor nutrition extends pregnancy (fewer resources for foetal development)
@@ -737,7 +789,9 @@ class Sheep:
         """Spawn pending offspring when gestation completes."""
         rows = len(grid)
         cols = len(grid[0]) if rows else 0
-        for baby_size, baby_speed, baby_maturity, baby_lifespan, baby_gestation, baby_hp, baby_social in self._pending_litter:
+        for baby_data in self._pending_litter:
+            (baby_size, baby_speed, baby_maturity, baby_lifespan,
+             baby_gestation, baby_hp, baby_social, baby_strength, baby_sex) = baby_data
             attempts = 0
             while attempts < 8:
                 attempts += 1
@@ -745,17 +799,23 @@ class Sheep:
                 oy = self.ty + random.uniform(-2.0, 2.0)
                 c, r = int(ox), int(oy)
                 if 0 <= r < rows and 0 <= c < cols and grid[r][c] != WATER:
-                    baby = Sheep(ox, oy, age=0.0,
-                                 genetic_size=baby_size,
-                                 genetic_maturity=baby_maturity,
-                                 genetic_lifespan=baby_lifespan,
-                                 genetic_gestation=baby_gestation,
-                                 genetic_hp=baby_hp,
-                                 genetic_social=baby_social)
-                    baby.hunger   = 0.0
-                    baby.speed    = baby_speed
-                    baby.herd_id  = self.herd_id
-                    baby.parent   = self
+                    kwargs = dict(age=0.0,
+                                  genetic_size=baby_size,
+                                  genetic_maturity=baby_maturity,
+                                  genetic_lifespan=baby_lifespan,
+                                  genetic_gestation=baby_gestation,
+                                  genetic_hp=baby_hp,
+                                  genetic_social=baby_social,
+                                  genetic_strength=baby_strength)
+                    if _OFFSPRING_FACTORY is not None:
+                        baby = _OFFSPRING_FACTORY(ox, oy, sex=baby_sex, **kwargs)
+                    else:
+                        baby = Sheep(ox, oy, **kwargs)
+                        baby.sex = baby_sex
+                    baby.hunger  = 0.0
+                    baby.speed   = baby_speed
+                    baby.herd_id = self.herd_id
+                    baby.parent  = self
                     new_sheep.append(baby)
                     break
 
@@ -843,7 +903,7 @@ class Sheep:
         if self.state != Sheep.EAT:
             hunger_mult    = self._gestation_hunger_mult if self.pregnant else 1.0
             hp_hunger_mult = 1.0 + (self.genetic_hp - HP_MIN) * 0.01
-            self.hunger = min(1.0, self.hunger + HUNGER_RATE * self.genetic_size * hp_hunger_mult * hunger_mult * dt)
+            self.hunger = min(1.0, self.hunger + HUNGER_RATE * self.genetic_size * hp_hunger_mult * hunger_mult * self._hunger_rate_mult * dt)
 
         # Nutrition stress: exponential moving average over ~1 sim-day window
         alpha = dt / DAY_DURATION
