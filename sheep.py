@@ -10,7 +10,7 @@ _SHEEP_DIR = os.path.join(os.path.dirname(__file__), "white sheep")
 # ---------------------------------------------------------------------------
 # Hunger / eating  (+15% baseline hunger rate)
 # ---------------------------------------------------------------------------
-HUNGER_RATE              = 0.005    # slow accumulation — sheep graze peacefully
+HUNGER_RATE              = 0.0045   # slow accumulation — sheep graze peacefully
 EAT_RATE                 = 0.10
 EAT_DURATION             = 20.0   # sheep graze slowly — long eating sessions
 HUNGER_THRESHOLD         = 0.55
@@ -782,7 +782,8 @@ class Sheep:
             self._pending_litter        = pending
 
             self.reproduce_cooldown  = REPRODUCE_COOLDOWN
-            other.reproduce_cooldown = REPRODUCE_COOLDOWN
+            # Males get a brief cooldown so they can keep mating with other females
+            other.reproduce_cooldown = 30.0 if getattr(other, 'sex', 'female') == 'male' else REPRODUCE_COOLDOWN
             return
 
     def _birth(self, grid: list, new_sheep: list):
@@ -1106,17 +1107,14 @@ class Sheep:
         sy     = sy_center - h // 2
         screen.blit(sprite, (sx, sy))
 
-        # Hunger bar — only shown on living sheep
-        if self.dead_state is None and self.hunger > 0.2:
-            bar_w  = w
-            bar_h  = max(2, round(effective_ts) // 7)
-            bar_y  = sy - bar_h - 2
-            filled = int(bar_w * self.hunger)
+        # HP bar — shown only when injured
+        if self.dead_state is None and self.hp < float(self.genetic_hp):
+            bar_w   = w
+            bar_h   = max(2, round(effective_ts) // 7)
+            bar_y   = sy - bar_h - 2
+            hp_frac = max(0.0, self.hp / float(self.genetic_hp))
+            filled  = int(bar_w * hp_frac)
             pygame.draw.rect(screen, (40, 40, 40), (sx, bar_y, bar_w, bar_h))
-            if self.hunger < 0.5:
-                r = int(self.hunger * 2 * 255)
-                g = 200
-            else:
-                r = 220
-                g = int((1.0 - self.hunger) * 2 * 200)
-            pygame.draw.rect(screen, (r, g, 30), (sx, bar_y, filled, bar_h))
+            rc = int((1.0 - hp_frac) * 220)
+            gc = int(hp_frac * 200)
+            pygame.draw.rect(screen, (rc, gc, 30), (sx, bar_y, filled, bar_h))

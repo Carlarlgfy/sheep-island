@@ -16,7 +16,7 @@ import pygame
 
 from mapgen import WATER
 from sheep import (Sheep, HUNGER_RATE, HP_DRAIN_RATE, HP_MIN, DAY_DURATION,
-                   GENETIC_STRENGTH_RANGE, REPRODUCE_COOLDOWN)
+                   GENETIC_STRENGTH_RANGE, REPRODUCE_COOLDOWN, MATE_SEARCH_RADIUS)
 import sheep as _sheep_module
 
 _RAM_DIR = os.path.join(os.path.dirname(__file__), "White Ram")
@@ -583,8 +583,36 @@ class Ram(Sheep):
         # ── EXILED ──────────────────────────────────────────────────────────
         if self.ram_state == "exiled":
             self._exile_behavior(dt, flock)
-            # Run normal sheep movement (herd_id=-1 so no cohesion pull)
-            super().update(dt, grid, regrowth_timers, flock, new_sheep, dirty_callback)
+            # During the urgent flee phase, handle movement manually so the ram
+            # doesn't eat a strip of grass as he leaves the fight.
+            if self._exile_flee_timer > 0:
+                self.age += dt
+                if self.reproduce_cooldown > 0:
+                    self.reproduce_cooldown = max(0.0, self.reproduce_cooldown - dt)
+                hp_hunger_mult = 1.0 + (self.genetic_hp - HP_MIN) * 0.01
+                self.hunger = min(1.0,
+                    self.hunger + HUNGER_RATE * self.genetic_size * hp_hunger_mult * 0.95 * dt)
+                alpha = dt / DAY_DURATION
+                self._avg_hunger += (self.hunger - self._avg_hunger) * min(1.0, alpha)
+                if self.hunger >= 1.0:
+                    self.hp = max(0.0, self.hp - HP_DRAIN_RATE * dt)
+                if self.age >= self._effective_lifespan or self.hp <= 0:
+                    self._die()
+                    return
+                # Move away without eating
+                if self.state == Sheep.WALK:
+                    rows = len(grid)
+                    cols = len(grid[0]) if grid else 0
+                    sx, sy = self._separation_delta(flock, dt)
+                    new_tx = self.tx + self.dx * self.speed * dt + sx
+                    new_ty = self.ty + self.dy * self.speed * dt + sy
+                    nc, nr = int(new_tx), int(new_ty)
+                    if 0 <= nr < rows and 0 <= nc < cols and grid[nr][nc] != WATER:
+                        self.tx = new_tx
+                        self.ty = new_ty
+            else:
+                # Normal exile behavior — can graze, wander, seek herds
+                super().update(dt, grid, regrowth_timers, flock, new_sheep, dirty_callback)
             return
 
         # ── NORMAL / RECOVERING ─────────────────────────────────────────────
@@ -609,6 +637,37 @@ class Ram(Sheep):
     def _try_reproduce(self, flock: list, grid: list, new_sheep: list):
         """Rams don't get pregnant. Ewes find rams via their own _try_reproduce."""
         return
+
+    def _find_nearest_mate(self, flock: list):
+        """Override: alpha rams search the full herd awareness radius for eligible ewes."""
+        if not self.is_adult or self.herd_id < 0:
+            return None
+        search_r = max(MATE_SEARCH_RADIUS,
+                       getattr(self, 'herd_awareness_r', MATE_SEARCH_RADIUS))
+        best_dist = float('inf')
+        best_dx, best_dy = 0.0, 0.0
+        found = False
+        for other in flock:
+            if (other is self
+                    or other.dead_state is not None
+                    or not other.is_adult
+                    or other.infertile
+                    or other.pregnant
+                    or getattr(other, 'sex', 'female') == 'male'
+                    or other.herd_id != self.herd_id):
+                continue
+            if other.hunger >= other._reproduce_threshold or other.reproduce_cooldown > 0:
+                continue
+            ddx  = other.tx - self.tx
+            ddy  = other.ty - self.ty
+            dist = math.sqrt(ddx * ddx + ddy * ddy)
+            if dist < best_dist and dist <= search_r:
+                best_dist = dist
+                if dist > 0:
+                    best_dx = ddx / dist
+                    best_dy = ddy / dist
+                found = True
+        return (best_dx, best_dy) if found else None
 
     # ------------------------------------------------------------------
     # Draw — uses Ram sprites; handles ramming_speed frame
@@ -645,19 +704,16 @@ class Ram(Sheep):
         sy     = sy_center - h // 2
         screen.blit(sprite, (sx, sy))
 
-        # Hunger bar (same logic as Sheep)
-        if self.dead_state is None and self.hunger > 0.2:
-            bar_w  = w
-            bar_h  = max(2, round(effective_ts) // 7)
-            bar_y  = sy - bar_h - 2
-            filled = int(bar_w * self.hunger)
+        # HP bar — shown only when injured
+        if self.dead_state is None and self.hp < float(self.genetic_hp):
+            bar_w   = w
+            bar_h   = max(2, round(effective_ts) // 7)
+            bar_y   = sy - bar_h - 2
+            hp_frac = max(0.0, self.hp / float(self.genetic_hp))
+            filled  = int(bar_w * hp_frac)
             pygame.draw.rect(screen, (40, 40, 40), (sx, bar_y, bar_w, bar_h))
-            if self.hunger < 0.5:
-                rc = int(self.hunger * 2 * 255)
-                gc = 200
-            else:
-                rc = 220
-                gc = int((1.0 - self.hunger) * 2 * 200)
+            rc = int((1.0 - hp_frac) * 220)
+            gc = int(hp_frac * 200)
             pygame.draw.rect(screen, (rc, gc, 30), (sx, bar_y, filled, bar_h))
 
 
