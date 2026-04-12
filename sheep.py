@@ -41,6 +41,10 @@ CORPSE_AVERSION_FORCE    = 2.0     # repulsion strength
 FERTILIZE_RADIUS         = 3       # tile radius of fertilizer effect when corpse decays
 FERTILIZE_REGROWTH       = 60.0    # fast regrowth time (seconds) on fertilized tiles
 
+# Wolf / predator
+MEAT_PER_SIZE_UNIT       = 6.0     # meat_value = genetic_size * this; set on death
+WOLF_FEAR_WEIGHT         = 14.0    # how strongly wolf flee direction overrides normal walk
+
 # ---------------------------------------------------------------------------
 # Lifespan  (13–21 days with heritable variation; +3 days average vs. old 10–18)
 # ---------------------------------------------------------------------------
@@ -247,6 +251,13 @@ class Sheep:
         self.dead_state   = None
         self.death_timer  = 0.0
         self.death_facing = "right"   # facing direction recorded at moment of death
+        self.meat_value   = 0.0       # set to genetic_size * MEAT_PER_SIZE_UNIT on death
+
+        # Wolf fear — written by Wolf.update() when a wolf is hunting nearby
+        self.wolf_aware       = False
+        self.wolf_flee_dx     = 0.0
+        self.wolf_flee_dy     = 0.0
+        self._wolf_fear_timer = 0.0
 
         self._schedule_idle()
 
@@ -386,6 +397,15 @@ class Sheep:
                 self._refresh_facing()
             else:
                 self._schedule_idle()
+            return
+
+        # --- Wolf flee: overrides all other movement when scared ---
+        if self.wolf_aware and (self.wolf_flee_dx != 0.0 or self.wolf_flee_dy != 0.0):
+            self.dx = self.wolf_flee_dx
+            self.dy = self.wolf_flee_dy
+            self._refresh_facing()
+            self.state = Sheep.WALK
+            self.timer = random.uniform(2.0, 4.5)
             return
 
         # --- Base random direction ---
@@ -837,6 +857,8 @@ class Sheep:
         self.herd_id        = -1
         self.pregnant       = False
         self._pending_litter = []
+        # Meat available to wolves — scales with body size
+        self.meat_value = self.genetic_size * MEAT_PER_SIZE_UNIT
 
     def _update_corpse(self, dt: float, grid: list, regrowth_timers: dict,
                        dirty_callback=None):
@@ -891,6 +913,14 @@ class Sheep:
         self.timer -= dt
         if self.reproduce_cooldown > 0:
             self.reproduce_cooldown = max(0.0, self.reproduce_cooldown - dt)
+
+        # Decay wolf fear over time
+        if self._wolf_fear_timer > 0:
+            self._wolf_fear_timer -= dt
+            if self._wolf_fear_timer <= 0:
+                self.wolf_aware   = False
+                self.wolf_flee_dx = 0.0
+                self.wolf_flee_dy = 0.0
 
         # Gestation tick — birth when timer expires
         if self.pregnant:

@@ -139,7 +139,8 @@ class HerdManager:
     # Public
     # ------------------------------------------------------------------
 
-    def update(self, dt: float, animals: list, grid: list = None):
+    def update(self, dt: float, animals: list, grid: list = None,
+               wolves: list = None):
         if grid is not None:
             self._grid = grid
         living  = [a for a in animals if getattr(a, 'dead_state', None) is None]
@@ -152,6 +153,10 @@ class HerdManager:
 
         if living:
             self._update_herds(dt, living, corpses)
+
+        # Wolf-threat: trigger emergency flee migrations for herds near hunting wolves
+        if wolves and living:
+            self._apply_wolf_threat(living, wolves)
 
     # ------------------------------------------------------------------
     # Reassignment (flood-fill + curiosity defection)
@@ -483,6 +488,86 @@ class HerdManager:
         if land == 0:
             return 1.0
         return grass / land
+
+    # ------------------------------------------------------------------
+    # Wolf threat response
+    # ------------------------------------------------------------------
+
+    def _apply_wolf_threat(self, animals: list, wolves: list):
+        """
+        For each hunting wolf close to a herd, trigger an emergency flee
+        migration away from the wolf.  Individual sheep also get wolf_aware
+        set so their personal _schedule_walk overrides to flee direction.
+        """
+        WOLF_ALARM_R_SQ = 40.0 ** 2   # herd center within 40 tiles of a hunting wolf
+
+        # Collect hunting wolf positions
+        threat_positions = []
+        for w in wolves:
+            if w.dead_state is not None or not w.alive:
+                continue
+            # Import locally to avoid circular import at module load
+            from wolf import Wolf as _Wolf
+            if w.state in (_Wolf.HUNT, _Wolf.LUNGE):
+                threat_positions.append((w.tx, w.ty))
+
+        if not threat_positions:
+            return
+
+        # Group sheep by herd
+        by_herd: dict[int, list] = {}
+        for a in animals:
+            if a.herd_id >= 0:
+                by_herd.setdefault(a.herd_id, []).append(a)
+
+        for hid, members in by_herd.items():
+            data = self._herds.get(hid)
+            if data is None:
+                continue
+            cx, cy = data.cx, data.cy
+
+            # Find the nearest threatening wolf to this herd center
+            nearest_sq   = float('inf')
+            nearest_wx   = cx
+            nearest_wy   = cy
+            for wx, wy in threat_positions:
+                d_sq = (wx - cx) ** 2 + (wy - cy) ** 2
+                if d_sq < nearest_sq:
+                    nearest_sq = d_sq
+                    nearest_wx = wx
+                    nearest_wy = wy
+
+            if nearest_sq > WOLF_ALARM_R_SQ:
+                continue
+
+            # Flee direction: away from wolf
+            fdx = cx - nearest_wx
+            fdy = cy - nearest_wy
+            fd  = math.sqrt(fdx * fdx + fdy * fdy)
+            if fd == 0:
+                continue
+            fdx /= fd; fdy /= fd
+
+            # Emergency flee migration away from wolf
+            if data.state != _HerdData.MIGRATING:
+                # Pick a target far away from the wolf
+                flee_dist = max(data.awareness_r * 1.8, 30.0)
+                mtx = cx + fdx * flee_dist
+                mty = cy + fdy * flee_dist
+                data.mtx   = mtx
+                data.mty   = mty
+                data.state = _HerdData.MIGRATING
+                data.timer = 45.0
+                data.emergency = True
+
+            # Set wolf_aware on every herd member
+            from wolf import WOLF_SCARE_DURATION as _SCARE_DUR
+            for a in members:
+                a.wolf_aware       = True
+                a._wolf_fear_timer = max(getattr(a, '_wolf_fear_timer', 0.0),
+                                         _SCARE_DUR)
+                a.wolf_flee_dx     = fdx
+                a.wolf_flee_dy     = fdy
 
     # ------------------------------------------------------------------
     # Per-frame herd state machine + attribute injection

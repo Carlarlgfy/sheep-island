@@ -5,7 +5,9 @@
       "Bash(python3 -c \"import sheep; print\\('sheep.py OK'\\)\")",
       "Bash(python3 -c \"import grass; import herd; import main; print\\('all modules OK'\\)\")",
       "Bash(python3 -c \"import sheep; import herd; import grass; import main; print\\('all OK'\\)\")",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(python3:*)",
+      "Bash(.venv/bin/python:*)"
     ]
   }
 }
