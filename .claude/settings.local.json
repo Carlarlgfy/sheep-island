@@ -7,7 +7,8 @@
       "Bash(python3 -c \"import sheep; import herd; import grass; import main; print\\('all OK'\\)\")",
       "Bash(python:*)",
       "Bash(python3:*)",
-      "Bash(.venv/bin/python:*)"
+      "Bash(.venv/bin/python:*)",
+      "Bash(ls /home/charles/Code/sheep-island/*.py)"
     ]
   }
 }
