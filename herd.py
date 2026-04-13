@@ -26,9 +26,12 @@ from mapgen import WATER, SAND, GRASS, DIRT
 # Tuning
 # ---------------------------------------------------------------------------
 
-HERD_PROXIMITY      = 12.0   # tiles — max distance to be in the same herd (covers 10-20 tile spawn area)
+HERD_PROXIMITY      = 18.0   # tiles — herds should stay connected instead of fragmenting immediately
 REASSIGN_INTERVAL   = 10.0   # sim-seconds between flood-fill reassignments
 CURIOSITY_SWITCH    = 0.03   # base defection probability per reassignment cycle
+OPTIMAL_HERD_SIZE   = 50
+MAX_HERD_SIZE       = int(OPTIMAL_HERD_SIZE * 1.5)
+HERD_REASSEMBLE_RADIUS = 36.0
 
 # Herd merging
 MERGE_TRIGGER_RADIUS = 7.5   # tiles — nearby herds should merge more readily
@@ -62,7 +65,7 @@ HUNGER_MIGRATE_END       = 0.38
 GRASS_MIGRATE_THRESHOLD = 0.25   # migrate when <25% of land in awareness radius is grass
 
 # Awareness radius cap — prevents the herd from tolerating already-dispersed sheep
-AWARENESS_R_CAP     = 20.0  # max awareness radius regardless of actual spread
+AWARENESS_R_CAP     = 28.0  # larger herds need more room to stay one herd
 
 # Shared grazing patch — all herd members prefer eating here rather than scattering
 GRAZE_PATCH_RADIUS  = 14    # tile radius from herd center searched for best local grass
@@ -77,9 +80,9 @@ DIRT_MIGRATE_THRESHOLD = 0.65   # migrate when >65% of non-water/sand land is di
 # ---------------------------------------------------------------------------
 # Wolf awareness and flee
 # ---------------------------------------------------------------------------
-SHEEP_WOLF_AWARENESS_R    = 140.0  # tiles — sheep should avoid wolves from very far away
+SHEEP_WOLF_AWARENESS_R    = 180.0  # tiles — herds should start avoiding wolves well over 100 tiles out
 SHEEP_WOLF_SPOOK_FRAC     = 0.08   # alarm spreads quickly across the herd
-SHEEP_FLEE_MIN_DIST       = 80.0   # tiles — minimum flee-migration distance from wolf threat
+SHEEP_FLEE_MIN_DIST       = 120.0  # tiles — herds should clear a large buffer from wolves
 SHEEP_CORPSE_AVOID_DIST   = 50.0   # tiles — flee target penalty radius around corpses / wolves
 SHEEP_WOLF_ALARM_SPREAD_R = 10.0   # aware sheep spread alarm to nearby herd mates
 
@@ -209,6 +212,8 @@ class HerdManager:
 
         self._apply_curiosity_switches(animals, spatial, cell)
         self._maybe_merge_herds(animals)
+        self._reassemble_herds(animals)
+        self._split_oversized_herds(animals)
 
         # Build new herd dict, carrying over state from old herds where possible
         new_herds: dict[int, _HerdData] = {}
@@ -306,6 +311,89 @@ class HerdManager:
                     merged.add(h1)
                     by_herd[h2].extend(m1)
                     break  # h1 consumed; advance outer loop
+
+    def _reassemble_herds(self, animals: list):
+        by_herd: dict[int, list] = {}
+        for a in animals:
+            if a.herd_id >= 0:
+                by_herd.setdefault(a.herd_id, []).append(a)
+        if len(by_herd) < 2:
+            return
+
+        centers: dict[int, tuple[float, float]] = {}
+        for hid, members in by_herd.items():
+            centers[hid] = (
+                sum(a.tx for a in members) / len(members),
+                sum(a.ty for a in members) / len(members),
+            )
+
+        changed = True
+        reassemble_sq = HERD_REASSEMBLE_RADIUS ** 2
+        while changed:
+            changed = False
+            herd_ids = list(by_herd.keys())
+            for i, h1 in enumerate(herd_ids):
+                if h1 not in by_herd:
+                    continue
+                m1 = by_herd[h1]
+                if len(m1) >= OPTIMAL_HERD_SIZE:
+                    continue
+                c1x, c1y = centers[h1]
+                best = None
+                best_score = float("inf")
+                for h2 in herd_ids[i + 1:]:
+                    if h2 not in by_herd:
+                        continue
+                    m2 = by_herd[h2]
+                    if len(m1) + len(m2) > MAX_HERD_SIZE:
+                        continue
+                    c2x, c2y = centers[h2]
+                    d_sq = (c1x - c2x) ** 2 + (c1y - c2y) ** 2
+                    if d_sq > reassemble_sq:
+                        continue
+                    score = d_sq / max(1, len(m1) + len(m2))
+                    if score < best_score:
+                        best_score = score
+                        best = h2
+                if best is None:
+                    continue
+                for a in by_herd[best]:
+                    a.herd_id = h1
+                m1.extend(by_herd[best])
+                del by_herd[best]
+                centers[h1] = (
+                    sum(a.tx for a in m1) / len(m1),
+                    sum(a.ty for a in m1) / len(m1),
+                )
+                centers.pop(best, None)
+                changed = True
+                break
+
+    def _split_oversized_herds(self, animals: list):
+        by_herd: dict[int, list] = {}
+        for a in animals:
+            if a.herd_id >= 0:
+                by_herd.setdefault(a.herd_id, []).append(a)
+        if not by_herd:
+            return
+
+        next_id = max(by_herd) + 1
+        for hid, members in list(by_herd.items()):
+            n = len(members)
+            if n <= MAX_HERD_SIZE:
+                continue
+            split_count = min(4, max(2, math.ceil(n / OPTIMAL_HERD_SIZE)))
+            cx = sum(a.tx for a in members) / n
+            cy = sum(a.ty for a in members) / n
+            members.sort(key=lambda a: math.atan2(a.ty - cy, a.tx - cx))
+            buckets = [[] for _ in range(split_count)]
+            for idx, animal in enumerate(members):
+                buckets[idx % split_count].append(animal)
+            for bucket_idx, bucket in enumerate(buckets):
+                new_id = hid if bucket_idx == 0 else next_id + bucket_idx - 1
+                for animal in bucket:
+                    animal.herd_id = new_id
+            next_id += split_count - 1
 
     # ------------------------------------------------------------------
     # Terrain helpers

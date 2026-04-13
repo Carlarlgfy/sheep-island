@@ -32,10 +32,10 @@ HP_EAT_REGEN     = 0.3
 # Death / corpse
 # ---------------------------------------------------------------------------
 DAY_DURATION             = 300.0   # sim-seconds per in-game day (matches main.py)
-CORPSE_FRESH_MIN         = DAY_DURATION * 2    # 2 days as fresh corpse
-CORPSE_FRESH_MAX         = DAY_DURATION * 3    # 3 days as fresh corpse
-CORPSE_DECAYED_MIN       = DAY_DURATION * 2    # 2 days as decayed corpse
-CORPSE_DECAYED_MAX       = DAY_DURATION * 3    # 3 days as decayed corpse
+CORPSE_FRESH_MIN         = DAY_DURATION * 1    # corpses should turn quickly once dead
+CORPSE_FRESH_MAX         = DAY_DURATION * 2
+CORPSE_DECAYED_MIN       = DAY_DURATION * 1
+CORPSE_DECAYED_MAX       = DAY_DURATION * 2
 CORPSE_AVERSION_RADIUS   = 2.5     # tiles — living sheep try to stay this far from corpses
 CORPSE_AVERSION_FORCE    = 2.0     # repulsion strength
 FERTILIZE_RADIUS         = 3       # tile radius of fertilizer effect when corpse decays
@@ -928,7 +928,7 @@ class Sheep:
         if self.age < self.maturity_age:
             corpse_meat *= 0.5
         self.dead_state   = "fresh"
-        self.death_timer  = DAY_DURATION * (1.25 + 0.018 * self.genetic_hp + 0.30 * self.genetic_size)
+        self.death_timer  = DAY_DURATION * (0.60 + 0.010 * self.genetic_hp + 0.16 * self.genetic_size)
         self.death_facing = self.facing
         # Stop movement — corpse is inert
         self.state = Sheep.IDLE

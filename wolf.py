@@ -27,11 +27,12 @@ _WOLF_DIR = os.path.join(os.path.dirname(__file__), "brown gray female wolf")
 # ---------------------------------------------------------------------------
 
 # Hunger
-WOLF_HUNGER_RATE          = 0.00042   # wolves only need to feed every few days
-WOLF_HUNGER_HUNT          = 0.45      # start actively hunting above this
+WOLF_HUNGER_RATE          = 0.00028   # slow accumulation — wolves are built for feast/famine
+WOLF_HUNGER_HUNT          = 0.42      # start actively hunting above this
 WOLF_HUNGER_DESPERATE     = 0.72      # ignore ram risk, push through everything
-WOLF_EAT_RATE             = 1.44      # eating time reduced by 75% across the board
-WOLF_HUNGER_PER_MEAT      = 0.42      # wolves saturate very quickly after feeding
+WOLF_HUNGER_STARVING      = 0.88      # only starving wolves should return to old corpses
+WOLF_EAT_RATE             = 0.65      # deliberate eating — feast should be visible and last a minute+
+WOLF_HUNGER_PER_MEAT      = 0.28      # balanced with larger meat pool per carcass
 WOLF_EAT_REGEN            = 0.20      # HP restored per second while eating
 
 # HP
@@ -64,32 +65,32 @@ WOLF_SCARE_RADIUS         = 120.0  # sheep should strongly avoid wolf presence
 WOLF_SCARE_DURATION       = 18.0   # seconds sheep stay scared after a wolf is near
 
 # Corpse feasting limit
-WOLF_MAX_EATERS_MIN       = 2      # minimum concurrent feeders per corpse
-WOLF_MAX_EATERS_MAX       = 4      # maximum concurrent feeders per corpse
+WOLF_MAX_EATERS_MIN       = 3      # minimum concurrent feeders per corpse
+WOLF_MAX_EATERS_MAX       = 6      # maximum concurrent feeders per corpse
 
 # Meat
-MEAT_PER_SIZE_UNIT        = 6.0    # sheep.genetic_size × this = meat_value on death
+MEAT_PER_SIZE_UNIT        = 14.0   # enough for the whole pack; depletes in ~15-25s of feasting
 WOLF_SMELL_MEAT_THRESHOLD = 0.08   # corpse ignored only when nearly full (hunger below this)
 
 # Rival pack contest
 WOLF_RIVAL_SCARE_RADIUS   = 12.0   # range at which a larger pack scares rival wolves off a corpse
 
 # Reproduction
-WOLF_REPRODUCE_COOLDOWN   = 1800.0  # ~6 days between litters
-WOLF_GESTATION_BASE       = 300.0   # 1 day base gestation for reproduction debugging
-WOLF_GESTATION_PER_CUB    = 0.0     # keep experimental gestation at roughly 1 day total
+WOLF_REPRODUCE_COOLDOWN   = 1400.0  # ~4.7 days between litters
+WOLF_GESTATION_BASE       = 1000.0  # ~3.3 day gestation
+WOLF_GESTATION_PER_CUB    = 0.0     # keep gestation close to base total
 WOLF_GESTATION_RANGE      = 0.18    # ±18% heritable modifier
 WOLF_LITTER_MIN           = 4
-WOLF_LITTER_MAX           = 5
-WOLF_PUP_MORTALITY        = 0.20
-WOLF_REPRODUCE_HUNGER     = 0.42    # breeding should still happen in healthy packs
-WOLF_MATE_RADIUS          = 10.0    # tiles for mating
+WOLF_LITTER_MAX           = 6       # occasional bigger litters
+WOLF_PUP_MORTALITY        = 0.12    # 12% at-birth mortality (was 20%)
+WOLF_REPRODUCE_HUNGER     = 0.46    # can breed at moderate hunger
+WOLF_MATE_RADIUS          = 15.0    # tiles for mating — pack spreads out so wider range
 
 # Lifespan / maturation
 WOLF_LIFESPAN_MIN         = 6000.0  # 20 days
 WOLF_LIFESPAN_MAX         = 12000.0 # 40 days
 WOLF_LIFESPAN_RANGE       = 0.10    # ±10% heritable modifier
-WOLF_MATURITY_AGE_BASE    = 1500.0  # 5 days
+WOLF_MATURITY_AGE_BASE    = 1100.0  # ~3.7 days — pups mature a bit faster
 
 # Genetics ranges (multiplicative around 1.0)
 WOLF_SIZE_RANGE           = 0.18
@@ -98,13 +99,19 @@ WOLF_AWARENESS_RANGE      = 0.15
 WOLF_GESTATION_RANGE      = 0.18
 
 # Pup early-mortality tracking
-WOLF_PUP_DEATH_DAILY      = 0.18   # 18%/day chance of pup dying until maturity
+WOLF_PUP_DEATH_DAILY      = 0.08   # 8%/day — pups are hard but the pack protects them
 DAY_DURATION              = 300.0  # sim-seconds per in-game day
-WOLF_EAT_MAX_SESSION      = DAY_DURATION * 0.08  # active biting should be a brief event
-WOLF_CORPSE_APPROACH_MAX  = 8.0                  # abandon a corpse if a slot takes too long to reach
-WOLF_CORPSE_COMMIT_MAX    = DAY_DURATION * 0.10  # total corpse-focused time (approach + eating)
-WOLF_MEAL_COOLDOWN_MIN    = DAY_DURATION * 2.0   # after a proper meal, no hunting/eating for 2 days
-WOLF_MEAL_COOLDOWN_MAX    = DAY_DURATION * 3.0   # after a proper meal, no hunting/eating for 3 days
+
+# Pup feeding (regurgitation — satiated adults feed nearby offspring)
+WOLF_PUP_FEED_RADIUS        = 9.0             # tiles — adult must be this close to a pup
+WOLF_PUP_FEED_AMOUNT        = 0.55            # hunger units reduced in pup per regurgitation
+WOLF_PUP_FEED_INTERVAL      = 35.0            # seconds between feedings (per adult wolf)
+WOLF_PUP_FEED_MIN_COOLDOWN  = DAY_DURATION    # adult must have ≥1 day of satiation left
+WOLF_EAT_MAX_SESSION      = DAY_DURATION * 0.09  # ~27 sec max eating — quick but visible
+WOLF_CORPSE_APPROACH_MAX  = 10.0                 # abandon a corpse if slot takes too long to reach
+WOLF_CORPSE_COMMIT_MAX    = DAY_DURATION * 0.13  # ~39 sec total commitment (approach + eating)
+WOLF_MEAL_COOLDOWN_MIN    = DAY_DURATION * 1.5   # 1.5 days before hunting again
+WOLF_MEAL_COOLDOWN_MAX    = DAY_DURATION * 2.5   # 2.5 days max satiation window
 
 # Post-maturity earned growth (battle-hardening / well-fed bulk)
 WOLF_EARN_SIZE_MAX        = 0.30   # max extra size fraction earned through good feeding
@@ -113,10 +120,10 @@ WOLF_EARN_SIZE_RATE       = 0.00005 # earned-size gain per sim-second while sati
 WOLF_EARN_STR_PER_LUNGE   = 0.003  # earned-strength gain per lunge delivered (combat exp)
 
 # Corpse timers (wolves decay at similar rate to sheep)
-WOLF_CORPSE_FRESH_MIN     = DAY_DURATION * 2
-WOLF_CORPSE_FRESH_MAX     = DAY_DURATION * 3
-WOLF_CORPSE_DECAYED_MIN   = DAY_DURATION * 2
-WOLF_CORPSE_DECAYED_MAX   = DAY_DURATION * 3
+WOLF_CORPSE_FRESH_MIN     = DAY_DURATION * 1
+WOLF_CORPSE_FRESH_MAX     = DAY_DURATION * 2
+WOLF_CORPSE_DECAYED_MIN   = DAY_DURATION * 1
+WOLF_CORPSE_DECAYED_MAX   = DAY_DURATION * 2
 
 # Movement / separation
 WOLF_SEPARATION_FORCE     = 2.4
@@ -129,11 +136,11 @@ WOLF_PATROL_INTERVAL_MIN  = 6.0
 WOLF_PATROL_INTERVAL_MAX  = 14.0
 
 # Pack cohesion (pulls wolves back toward pack center when they stray)
-WOLF_PACK_COHESION_FORCE  = 10.5   # stronger pull so packs stay clustered
-WOLF_PACK_COHESION_INNER  = 10.0   # wolves should stay tighter around the pack core
-WOLF_PACK_MAX_STRAY       = 64.0   # only rare far pursuits should peel wolves off the pack
-WOLF_PACK_ALPHA_FOLLOW_DIST = 6.0  # most wolves should hang close to the alpha
-WOLF_PACK_ALPHA_PULL      = 8.5    # non-alphas actively follow the alpha instead of drifting
+WOLF_PACK_COHESION_FORCE  = 14.0   # much stronger pull so packs stay visibly bunched
+WOLF_PACK_COHESION_INNER  = 7.0    # wolves should idle in a compact knot around the core
+WOLF_PACK_MAX_STRAY       = 42.0   # only very unusual pursuits should peel wolves off the pack
+WOLF_PACK_ALPHA_FOLLOW_DIST = 4.5  # most wolves should hang close to the alpha
+WOLF_PACK_ALPHA_PULL      = 12.0   # non-alphas actively follow the alpha instead of drifting
 
 # Size / sex presentation and appetite
 WOLF_BASE_DRAW_SCALE      = 1.20   # all wolves render 20% larger than before
@@ -148,10 +155,10 @@ WOLF_MATE_BOND_PULL       = 2.0
 WOLF_MATE_SEEK_PULL       = 2.2
 WOLF_MATE_SUPPORT_HUNGER  = 0.34
 WOLF_MATE_SUPPORT_HP_FRAC = 0.72
-WOLF_EAT_STOP_HUNGER      = 0.14
-WOLF_EAT_STOP_HP_FRAC     = 0.92
-WOLF_BETA_DURATION_MIN    = DAY_DURATION * 3.0
-WOLF_BETA_DURATION_MAX    = DAY_DURATION * 4.0
+WOLF_EAT_STOP_HUNGER      = 0.10    # eat until very full (was 0.14)
+WOLF_EAT_STOP_HP_FRAC     = 0.90
+WOLF_BETA_DURATION_MIN    = DAY_DURATION * 2.0  # shorter beta punishment (was 3 days)
+WOLF_BETA_DURATION_MAX    = DAY_DURATION * 3.0
 
 # Sheep territory avoidance (when not hungry enough to hunt)
 WOLF_SHEEP_AVOID_RADIUS   = 80.0   # chill packs should give sheep a very wide berth
@@ -159,29 +166,29 @@ WOLF_SHEEP_AVOID_MIN_N    = 1      # even a single nearby sheep matters while no
 WOLF_SHEEP_AVOID_FORCE    = 4.5    # strong push away from sheep while not hunting
 
 # Social play (satiated pack members chase and play with each other)
-WOLF_PLAY_HUNGER_MAX      = 0.22   # wolf must be below this hunger to play
-WOLF_PLAY_CHANCE          = 0.0060 # much more social play while satiated
-WOLF_PLAY_RADIUS          = 12.0   # tile radius to find a play partner
-WOLF_PLAY_CHASE_DURATION  = 18.0   # sim-seconds the chaser pursues
-WOLF_PLAY_SUBMIT_DURATION = 7.0    # sim-seconds the caught wolf stays submissive
+WOLF_PLAY_HUNGER_MAX      = 0.30   # wolf must be below this hunger to play
+WOLF_PLAY_CHANCE          = 0.018  # frequent play while satiated — packs should feel alive
+WOLF_PLAY_RADIUS          = 18.0   # wider search radius for play partners
+WOLF_PLAY_CHASE_DURATION  = 26.0   # longer chase — satisfying to watch
+WOLF_PLAY_SUBMIT_DURATION = 9.0    # caught wolf rolls around for a good while
 WOLF_PLAY_SPEED_MULT      = 0.85   # speed multiplier during play chase (slower than hunt)
-WOLF_IDLE_ROLL_CHANCE     = 0.08   # chance a very full idle wolf flops onto its back
-WOLF_ROLL_MIN             = 3.0
-WOLF_ROLL_MAX             = 8.0
+WOLF_IDLE_ROLL_CHANCE     = 0.14   # full wolves flop on their back more often
+WOLF_ROLL_MIN             = 4.0
+WOLF_ROLL_MAX             = 10.0
 
-# Post-feed lounge (wolves camp near kill site for 1–2 sim-days after a big meal)
-WOLF_LOUNGE_HUNGER_TRIGGER = 0.20  # enter lounge when hunger drops below this on EAT exit
+# Post-feed lounge (wolves camp near kill site for 1–3 sim-days after a big meal)
+WOLF_LOUNGE_HUNGER_TRIGGER = 0.30  # enter lounge when hunger drops below this on EAT exit
 WOLF_LOUNGE_MIN            = DAY_DURATION * 1.0   # 300 sim-seconds = 1 day
-WOLF_LOUNGE_MAX            = DAY_DURATION * 3.0   # 900 sim-seconds = 3 days
-WOLF_LOUNGE_IDLE_MIN       = 18.0  # lounge idle period min (longer rests than normal)
-WOLF_LOUNGE_IDLE_MAX       = 45.0
-WOLF_LOUNGE_WALK_MIN       = 4.0   # short walk bursts so they don't stray far
-WOLF_LOUNGE_WALK_MAX       = 9.0
-WOLF_LOUNGE_DRIFT_RADIUS   = 10.0  # tiles from anchor before drift-back kicks in
-WOLF_LOUNGE_DRIFT_FORCE    = 1.6   # pull-back strength (tiles/sec)
-WOLF_LOUNGE_HUNT_HUNGER    = 0.82  # only break lounge to hunt when genuinely hungry
-WOLF_CORPSE_CHEW_DECAY     = 18.0  # fed-on corpses decompose much faster under active chewing
-WOLF_PACK_CHILL_PLAY_BONUS = 8.0
+WOLF_LOUNGE_MAX            = DAY_DURATION * 2.5   # 750 sim-seconds = 2.5 days
+WOLF_LOUNGE_IDLE_MIN       = 20.0  # lounge idle period min
+WOLF_LOUNGE_IDLE_MAX       = 50.0
+WOLF_LOUNGE_WALK_MIN       = 5.0   # short walk bursts
+WOLF_LOUNGE_WALK_MAX       = 12.0  # slightly longer exploration bursts
+WOLF_LOUNGE_DRIFT_RADIUS   = 14.0  # wolves can wander a bit further from camp
+WOLF_LOUNGE_DRIFT_FORCE    = 1.4   # gentler pull-back — let them roam a little
+WOLF_LOUNGE_HUNT_HUNGER    = 0.76  # break lounge a bit sooner when hungry (was 0.82)
+WOLF_CORPSE_CHEW_DECAY     = 18.0  # slightly slower corpse decay while eating
+WOLF_PACK_CHILL_PLAY_BONUS = 14.0  # big play bonus during chill — this is their fun time
 WOLF_PACK_DEFENSE_RADIUS   = 22.0
 
 
@@ -410,6 +417,8 @@ class Wolf:
         self._eat_session_meat     = 0.0
         self._corpse_commit_timer  = 0.0
         self._corpse_approach_timer = 0.0
+        self._may_eat_kill_id      = None  # id() of corpse this wolf just killed; grants eat bypass
+        self._pup_feed_timer       = 0.0   # cooldown between regurgitation feedings
 
         # Flee state
         self._flee_timer           = 0.0
@@ -427,6 +436,9 @@ class Wolf:
         self.pack_mode_timer       = 0.0
         self.pack_alpha_id         = self.wolf_id
         self.pack_is_alpha         = True
+        self.pack_camp_x           = tile_x
+        self.pack_camp_y           = tile_y
+        self.pack_blocked_corpse_id = None
 
         # Social play
         self._play_target       = None   # ref to packmate being chased
@@ -657,9 +669,9 @@ class Wolf:
         Skips corpses held by a rival pack that is larger than this wolf's pack.
         Wolves that are nearly full (hunger < WOLF_SMELL_MEAT_THRESHOLD) ignore corpses.
         """
-        if self._meal_cooldown > 0.0:
+        if self._meal_cooldown > 0.0 or self.pack_mode == "camp":
             return None
-        if self.hunger < WOLF_SMELL_MEAT_THRESHOLD:
+        if self.hunger < WOLF_HUNGER_STARVING:
             return None
         smell_sq     = WOLF_SMELL_RADIUS ** 2
         best_dist_sq = float('inf')
@@ -667,6 +679,8 @@ class Wolf:
 
         for sheep in sheep_list:
             if sheep.dead_state != "fresh":
+                continue
+            if id(sheep) == self.pack_blocked_corpse_id:
                 continue
             if getattr(sheep, 'meat_value', 0.0) <= 0:
                 continue
@@ -975,6 +989,12 @@ class Wolf:
     def _enter_lounge(self):
         """Trigger post-feed lounge if wolf is very satiated."""
         if self.hunger <= WOLF_LOUNGE_HUNGER_TRIGGER and self._lounge_timer <= 0:
+            if self.pack_mode == "camp":
+                self._lounge_timer = max(self.pack_mode_timer, random.uniform(WOLF_MEAL_COOLDOWN_MIN,
+                                                                              WOLF_MEAL_COOLDOWN_MAX))
+                self._lounge_anchor_x = self.pack_camp_x
+                self._lounge_anchor_y = self.pack_camp_y
+                return
             if self.pack_mode == "chill":
                 self._lounge_timer = max(self.pack_mode_timer, random.uniform(WOLF_LOUNGE_MIN, WOLF_LOUNGE_MAX))
             else:
@@ -982,12 +1002,32 @@ class Wolf:
             self._lounge_anchor_x = self.tx
             self._lounge_anchor_y = self.ty
 
+    def _feed_nearby_pups(self, wolf_list: list):
+        """Satiated adult regurgitates food for nearby pack pups during camp/chill."""
+        if (not self.is_adult
+                or self._pup_feed_timer > 0.0
+                or self._meal_cooldown < WOLF_PUP_FEED_MIN_COOLDOWN):
+            return
+        feed_sq = WOLF_PUP_FEED_RADIUS ** 2
+        for w in wolf_list:
+            if (w is self or not w.alive or w.dead_state is not None
+                    or w.is_adult or w.pack_id != self.pack_id
+                    or w.hunger <= 0.05):
+                continue
+            ddx = w.tx - self.tx
+            ddy = w.ty - self.ty
+            if ddx * ddx + ddy * ddy <= feed_sq:
+                w.hunger = max(0.0, w.hunger - WOLF_PUP_FEED_AMOUNT)
+                self._pup_feed_timer = WOLF_PUP_FEED_INTERVAL
+                return  # feed one pup per interval
+
     def _start_eating(self, corpse):
         self.state = Wolf.EAT
         self._hunt_target = corpse
         self._eat_session_timer = 0.0
         self._eat_session_meat = 0.0
         self._corpse_approach_timer = 0.0
+        self._may_eat_kill_id = None  # used up once eating begins
 
     def _finish_eating(self):
         had_meal = self._eat_session_timer > 0.0 and self._eat_session_meat > 0.0
@@ -1054,6 +1094,7 @@ class Wolf:
 
         if target.hp <= 0:
             target._die()
+            self._may_eat_kill_id = id(target)  # killer gets first-bite bypass
             return True
         return False
 
@@ -1279,6 +1320,8 @@ class Wolf:
             self._roll_timer = max(0.0, self._roll_timer - dt)
         if self._lounge_timer > 0:
             self._lounge_timer = max(0.0, self._lounge_timer - dt)
+        if self._pup_feed_timer > 0:
+            self._pup_feed_timer = max(0.0, self._pup_feed_timer - dt)
 
         # Pup daily mortality check
         if not self.is_adult:
@@ -1316,7 +1359,9 @@ class Wolf:
             t = self._hunt_target
             if not t.alive or t.dead_state is not None:
                 # Target died — move to eat it if fresh
-                if t.dead_state == "fresh" and getattr(t, 'meat_value', 0) > 0:
+                if (t.dead_state == "fresh"
+                        and getattr(t, 'meat_value', 0) > 0
+                        and self.pack_mode == "feast"):
                     self.state        = Wolf.HUNT
                     self._hunt_target = t  # will be picked up as corpse
                 else:
@@ -1356,6 +1401,9 @@ class Wolf:
 
         # ── LOUNGE ──────────────────────────────────────────────────────
         if self.state == Wolf.LOUNGE:
+            if self.pack_mode == "camp":
+                self._lounge_anchor_x = self.pack_camp_x
+                self._lounge_anchor_y = self.pack_camp_y
             # Break lounge if desperately hungry
             if self.hunger >= WOLF_LOUNGE_HUNT_HUNGER and self.pack_mode == "hunt":
                 self._lounge_timer = 0.0
@@ -1386,6 +1434,10 @@ class Wolf:
                         and not self.pregnant and self.reproduce_cooldown <= 0
                         and self.hunger < WOLF_REPRODUCE_HUNGER):
                     self._try_reproduce(wolf_list, new_wolves)
+
+                # Feed nearby pups while lounging in camp/chill
+                if self.pack_mode in ("camp", "chill"):
+                    self._feed_nearby_pups(wolf_list)
 
                 # Idle/walk oscillation with lounge biases
                 if self.timer <= 0:
@@ -1420,8 +1472,8 @@ class Wolf:
                     sx, sy = self._separation_delta(wolf_list, dt)
                     px, py = self._pack_cohesion_delta(dt)
                     fx, fy = self._pack_alpha_follow_delta(dt)
-                    new_tx = self.tx + self.dx * self.move_speed * 0.45 * dt + sx + px + fx
-                    new_ty = self.ty + self.dy * self.move_speed * 0.45 * dt + sy + py + fy
+                    new_tx = self.tx + self.dx * self.move_speed * 0.32 * dt + sx + px + fx
+                    new_ty = self.ty + self.dy * self.move_speed * 0.32 * dt + sy + py + fy
                     rows = len(grid); cols = len(grid[0]) if rows else 0
                     nc, nr = int(new_tx), int(new_ty)
                     if 0 <= nr < rows and 0 <= nc < cols and grid[nr][nc] != WATER:
@@ -1482,7 +1534,8 @@ class Wolf:
 
         # ── EAT ─────────────────────────────────────────────────────────
         if self.state == Wolf.EAT:
-            if self.pack_size > 1 and self.pack_mode != "feast":
+            if ((self.pack_size > 1 and self.pack_mode != "feast")
+                    or id(self._hunt_target) == self.pack_blocked_corpse_id):
                 self._finish_eating()
                 return
             corpse = self._hunt_target
@@ -1632,7 +1685,14 @@ class Wolf:
 
             # If target is now a fresh corpse — approach and eat (or scare rivals)
             if target is not None and target.dead_state == "fresh":
-                if self._meal_cooldown > 0.0:
+                can_feed_corpse = (
+                    self.pack_mode == "feast"
+                    or id(target) == self._may_eat_kill_id   # killer gets first bite
+                    or (self.pack_size <= 1 and self.hunger >= WOLF_HUNGER_STARVING)
+                )
+                if (self._meal_cooldown > 0.0
+                        or not can_feed_corpse
+                        or id(target) == self.pack_blocked_corpse_id):
                     self._hunt_target = None
                     self.state = Wolf.LOUNGE if self._lounge_timer > 0 else Wolf.WALK
                     self.timer = random.uniform(WOLF_WANDER_INTERVAL_MIN,
@@ -1689,7 +1749,7 @@ class Wolf:
                     corpse_close = ddx_c * ddx_c + ddy_c * ddy_c <= 12.0 * 12.0
                 if (corpse is not None
                         and self._corpse_has_open_slot(corpse, wolf_list)
-                        and (not prefer_live_pack_hunt or corpse_close or self.hunger >= 0.82)):
+                        and (not prefer_live_pack_hunt or corpse_close or self.hunger >= WOLF_HUNGER_STARVING)):
                     self._hunt_target = corpse
                     return
                 # Follow the pack's shared live target when possible
@@ -1749,9 +1809,12 @@ class Wolf:
         # ── IDLE / WALK ──────────────────────────────────────────────────
 
         # Should we start hunting?
-        can_seek_food = self._meal_cooldown <= 0.0
+        # Wolves in camp can still forage if they missed the feast and are getting hungry
+        can_seek_food = self._meal_cooldown <= 0.0 and (
+            self.pack_mode != "camp" or self.hunger >= 0.62
+        )
         mate_support = self._mate_hunt_support_target(wolf_list) if (self.pack_mode == "hunt" and can_seek_food) else None
-        defense_target = self._pack_defense_target(sheep_list)
+        defense_target = self._pack_defense_target(sheep_list) if self.pack_mode != "camp" else None
         should_hunt = (
             defense_target is not None or
             (can_seek_food and (
@@ -1803,8 +1866,8 @@ class Wolf:
                 self.state        = Wolf.HUNT
                 return
 
-        # Reproduction
-        if (self.pack_mode == "chill"
+        # Reproduction — allowed during chill AND camp (post-feast rest is prime breeding time)
+        if (self.pack_mode in ("chill", "camp")
                 and self.is_adult and self.sex == "female"
                 and not self.pregnant and self.reproduce_cooldown <= 0
                 and self.hunger < WOLF_REPRODUCE_HUNGER):
@@ -1854,7 +1917,7 @@ class Wolf:
             ax += qx
             ay += qy
             self._roll_timer = 0.0
-            drift_speed = self.move_speed * (0.72 if self.pack_size > 1 and not self.pack_is_alpha else 1.0)
+            drift_speed = self.move_speed * (0.55 if self.pack_size > 1 and not self.pack_is_alpha else 0.82 if self.pack_size > 1 else 1.0)
             new_tx = self.tx + self.dx * drift_speed * dt + sx + ax + px + fx
             new_ty = self.ty + self.dy * drift_speed * dt + sy + ay + py + fy
             rows = len(grid); cols = len(grid[0]) if rows else 0
