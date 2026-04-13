@@ -31,8 +31,8 @@ REASSIGN_INTERVAL   = 10.0   # sim-seconds between flood-fill reassignments
 CURIOSITY_SWITCH    = 0.03   # base defection probability per reassignment cycle
 
 # Herd merging
-MERGE_TRIGGER_RADIUS = 5.0   # tiles — members this close make two herds merge-eligible
-MERGE_CHANCE         = 0.14  # probability of merge per eligible pair per reassignment
+MERGE_TRIGGER_RADIUS = 7.5   # tiles — nearby herds should merge more readily
+MERGE_CHANCE         = 0.21  # about 50% more likely to merge per eligible pair
 GRASS_SNAP_RADIUS    = 35    # max tile radius searched when snapping CoG to grass
 
 # Gravitational pull toward herd center — WAY stronger than before
@@ -77,10 +77,11 @@ DIRT_MIGRATE_THRESHOLD = 0.65   # migrate when >65% of non-water/sand land is di
 # ---------------------------------------------------------------------------
 # Wolf awareness and flee
 # ---------------------------------------------------------------------------
-SHEEP_WOLF_AWARENESS_R    = 50.0   # tiles — individual sheep spot any wolf within this range
-SHEEP_WOLF_SPOOK_FRAC     = 0.20   # fraction of herd that must be wolf_aware to trigger flee
+SHEEP_WOLF_AWARENESS_R    = 140.0  # tiles — sheep should avoid wolves from very far away
+SHEEP_WOLF_SPOOK_FRAC     = 0.08   # alarm spreads quickly across the herd
 SHEEP_FLEE_MIN_DIST       = 80.0   # tiles — minimum flee-migration distance from wolf threat
 SHEEP_CORPSE_AVOID_DIST   = 50.0   # tiles — flee target penalty radius around corpses / wolves
+SHEEP_WOLF_ALARM_SPREAD_R = 10.0   # aware sheep spread alarm to nearby herd mates
 
 # ---------------------------------------------------------------------------
 # Death-panic migration  (exponential urgency as herd members die)
@@ -534,6 +535,7 @@ class HerdManager:
                             if getattr(c, 'dead_state', None) is not None]
 
         awareness_sq = SHEEP_WOLF_AWARENESS_R ** 2
+        spread_sq = SHEEP_WOLF_ALARM_SPREAD_R ** 2
 
         # Group living sheep by herd
         by_herd: dict[int, list] = {}
@@ -567,6 +569,22 @@ class HerdManager:
                             nearest_wolf_sq = d_sq
                             nearest_wx, nearest_wy = wx, wy
                         break  # one close wolf is enough to spook this sheep
+
+            # Alarm contagion: fleeing sheep spread awareness through the herd.
+            aware_members = [a for a in members if getattr(a, 'wolf_aware', False)]
+            if aware_members:
+                for a in members:
+                    if getattr(a, 'wolf_aware', False):
+                        continue
+                    for other in aware_members:
+                        d_sq = (other.tx - a.tx) ** 2 + (other.ty - a.ty) ** 2
+                        if d_sq <= spread_sq:
+                            a.wolf_aware = True
+                            a._wolf_fear_timer = max(getattr(a, '_wolf_fear_timer', 0.0),
+                                                     _SCARE_DUR * 0.8)
+                            a.wolf_flee_dx = getattr(other, 'wolf_flee_dx', 0.0)
+                            a.wolf_flee_dy = getattr(other, 'wolf_flee_dy', 0.0)
+                            break
 
             # Count currently spooked sheep in this herd
             spooked = sum(1 for a in members if getattr(a, 'wolf_aware', False))

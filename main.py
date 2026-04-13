@@ -22,7 +22,7 @@ TILE_SIZE_DEFAULT = 14.0
 TILE_SIZE_MIN     = 2.0
 TILE_SIZE_MAX     = 48.0
 ZOOM_FACTOR       = 1.1   # multiplicative zoom per step
-ZOOM_LERP         = 14.0  # smooth zoom animation speed (higher = snappier)
+ZOOM_LERP         = 18.0  # smooth zoom animation speed (higher = snappier)
 CAMERA_SPEED      = 55
 
 
@@ -75,7 +75,9 @@ def draw_loading(screen, font_title, font_ui, dot_count, sheep_surf,
 def draw_play_ui(screen, font_ui, back_btn, sheep_btn, wolf_btn,
                  sheep_tool, wolf_tool,
                  seed, tile_size, screen_w, screen_h, is_fullscreen, population,
-                 speed_btns, sim_speed_idx, day_number, ram_count=0, wolf_count=0):
+                 speed_btns, sim_speed_idx, day_number, ram_count=0, wolf_count=0,
+                 wolf_female_count=0, wolf_male_count=0,
+                 stats_btn=None, stats_open=False, stats_lines=None):
     bar_rect = pygame.Rect(0, screen_h - BOTTOM_BAR_H, screen_w, BOTTOM_BAR_H)
     pygame.draw.rect(screen, (30, 30, 30), bar_rect)
 
@@ -88,7 +90,7 @@ def draw_play_ui(screen, font_ui, back_btn, sheep_btn, wolf_btn,
     fs_hint = "F11: windowed" if is_fullscreen else "F11: fullscreen"
     hint = font_ui.render(
         f"Day {day_number}   Seed: {seed}   Zoom: {round(tile_size)}px   "
-        f"Sheep: {ewe_count}♀ {ram_count}♂   Wolves: {wolf_count}   "
+        f"Sheep: female {ewe_count} male {ram_count}   Wolves: female {wolf_female_count} male {wolf_male_count} total {wolf_count}   "
         f"WASD: move   Scroll/+/-: zoom   {fs_hint}",
         True, (160, 160, 160),
     )
@@ -105,6 +107,23 @@ def draw_play_ui(screen, font_ui, back_btn, sheep_btn, wolf_btn,
         else:
             btn["color"] = (55, 100, 55)    # green tint for play speeds
         draw_button(screen, btn, font_ui)
+
+    if stats_btn is not None:
+        stats_btn["color"] = (85, 125, 165) if stats_open else (70, 70, 110)
+        draw_button(screen, stats_btn, font_ui)
+
+    if stats_open and stats_lines:
+        panel_w = 280
+        line_h = 22
+        panel_h = 16 + line_h * len(stats_lines)
+        panel_x = screen_w - panel_w - 10
+        panel_y = screen_h - BOTTOM_BAR_H - panel_h - 10
+        panel = pygame.Rect(panel_x, panel_y, panel_w, panel_h)
+        pygame.draw.rect(screen, (24, 28, 38), panel, border_radius=10)
+        pygame.draw.rect(screen, (88, 108, 138), panel, width=2, border_radius=10)
+        for i, line in enumerate(stats_lines):
+            surf = font_ui.render(line, True, (220, 226, 235))
+            screen.blit(surf, (panel_x + 12, panel_y + 10 + i * line_h))
 
 
 # ---------------------------------------------------------------------------
@@ -127,13 +146,18 @@ def clamp_camera(cam_x, cam_y, tile_size, screen_w, screen_h):
     return cam_x, cam_y
 
 
-def zoom_camera(cam_x, cam_y, old_size, new_size, screen_w, screen_h):
-    """Keep the screen center fixed while zooming."""
+def zoom_camera(cam_x, cam_y, old_size, new_size, screen_w, screen_h,
+                anchor_sx=None, anchor_sy=None):
+    """Keep the chosen screen anchor fixed while zooming."""
     scale    = new_size / old_size
-    center_x = cam_x + screen_w // 2
-    center_y = cam_y + screen_h // 2
-    cam_x    = int(center_x * scale) - screen_w // 2
-    cam_y    = int(center_y * scale) - screen_h // 2
+    if anchor_sx is None:
+        anchor_sx = screen_w // 2
+    if anchor_sy is None:
+        anchor_sy = screen_h // 2
+    world_x  = cam_x + anchor_sx
+    world_y  = cam_y + anchor_sy
+    cam_x    = world_x * scale - anchor_sx
+    cam_y    = world_y * scale - anchor_sy
     return clamp_camera(cam_x, cam_y, new_size, screen_w, screen_h)
 
 
@@ -141,7 +165,7 @@ def zoom_camera(cam_x, cam_y, old_size, new_size, screen_w, screen_h):
 # Button layout  (recalculated every frame so resize is seamless)
 # ---------------------------------------------------------------------------
 
-def update_button_layout(gen_btn, quit_btn, back_btn, sheep_btn, wolf_btn,
+def update_button_layout(gen_btn, quit_btn, back_btn, sheep_btn, wolf_btn, stats_btn,
                          speed_btns, screen_w, screen_h):
     bw, bh = 260, 58
     bx = screen_w // 2 - bw // 2
@@ -150,6 +174,7 @@ def update_button_layout(gen_btn, quit_btn, back_btn, sheep_btn, wolf_btn,
     back_btn["rect"]  = pygame.Rect(10, 10, 155, 40)
     sheep_btn["rect"] = pygame.Rect(10,  screen_h - BOTTOM_BAR_H + 6, 100, 36)
     wolf_btn["rect"]  = pygame.Rect(116, screen_h - BOTTOM_BAR_H + 6, 100, 36)
+    stats_btn["rect"] = pygame.Rect(screen_w - 100, screen_h - BOTTOM_BAR_H + 6, 90, 36)
 
     # Speed buttons — top right, horizontal row
     sbw, sbh = 44, 34
@@ -184,6 +209,7 @@ def main():
     back_btn  = {"label": "Back to Menu", "rect": pygame.Rect(0, 0, 0, 0), "color": (70, 70, 110)}
     sheep_btn = {"label": "Sheep",        "rect": pygame.Rect(0, 0, 0, 0), "color": (70, 70, 110)}
     wolf_btn  = {"label": "Wolf",         "rect": pygame.Rect(0, 0, 0, 0), "color": (70, 70, 110)}
+    stats_btn = {"label": "Stats",        "rect": pygame.Rect(0, 0, 0, 0), "color": (70, 70, 110)}
     speed_btns = [{"label": lbl, "rect": pygame.Rect(0, 0, 0, 0), "color": (70, 70, 110)}
                   for lbl in SPEED_LABELS]
     title_buttons = [gen_btn, quit_btn]
@@ -201,6 +227,7 @@ def main():
     wolf_list:  list[Wolf]  = []
     sheep_tool       = False
     wolf_tool        = False
+    stats_open       = False
     regrowth_timers: dict[tuple, float] = {}   # (row, col) → seconds until grass returns
     time_of_day      = 0.0   # seconds into current day cycle
     day_number       = 1
@@ -223,6 +250,14 @@ def main():
     _lsheep_grazing = False
     _lsheep_facing  = "right"
     _lsheep_surf: pygame.Surface | None = None
+    zoom_anchor_x   = 0
+    zoom_anchor_y   = 0
+
+    def mark_terrain_changed(row: int, col: int):
+        if terrain_renderer is not None:
+            terrain_renderer.mark_dirty(row, col)
+        if grass_spread is not None:
+            grass_spread.on_tile_changed(row, col)
 
     # ---------------------------------------------------------------------------
     # Game loop
@@ -232,7 +267,7 @@ def main():
         screen_w, screen_h   = screen.get_size()
         mouse_pos            = pygame.mouse.get_pos()
 
-        update_button_layout(gen_btn, quit_btn, back_btn, sheep_btn, wolf_btn,
+        update_button_layout(gen_btn, quit_btn, back_btn, sheep_btn, wolf_btn, stats_btn,
                              speed_btns, screen_w, screen_h)
 
         # --- Events ---
@@ -256,9 +291,11 @@ def main():
 
                 if state == STATE_PLAY:
                     if event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
+                        zoom_anchor_x, zoom_anchor_y = screen_w // 2, screen_h // 2
                         target_tile_size = min(TILE_SIZE_MAX, target_tile_size * ZOOM_FACTOR)
 
                     elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                        zoom_anchor_x, zoom_anchor_y = screen_w // 2, screen_h // 2
                         target_tile_size = max(TILE_SIZE_MIN, target_tile_size / ZOOM_FACTOR)
 
                     elif event.key == pygame.K_ESCAPE:
@@ -267,8 +304,10 @@ def main():
                         wolf_list  = []
                         sheep_tool = False
                         wolf_tool  = False
+                        stats_open = False
 
             if event.type == pygame.MOUSEWHEEL and state == STATE_PLAY:
+                zoom_anchor_x, zoom_anchor_y = mouse_pos
                 if event.y > 0:
                     target_tile_size = min(TILE_SIZE_MAX, target_tile_size * ZOOM_FACTOR)
                 else:
@@ -316,6 +355,7 @@ def main():
                         wolf_list  = []
                         sheep_tool = False
                         wolf_tool  = False
+                        stats_open = False
 
                     elif sheep_btn["rect"].collidepoint(mouse_pos):
                         sheep_tool = not sheep_tool
@@ -326,6 +366,9 @@ def main():
                         wolf_tool = not wolf_tool
                         if wolf_tool:
                             sheep_tool = False
+
+                    elif stats_btn["rect"].collidepoint(mouse_pos):
+                        stats_open = not stats_open
 
                     else:
                         for i, btn in enumerate(speed_btns):
@@ -428,6 +471,7 @@ def main():
                 wolf_list         = []
                 sheep_tool        = False
                 wolf_tool         = False
+                stats_open        = False
                 regrowth_timers   = {}
                 time_of_day       = 0.0
                 day_number        = 1
@@ -441,7 +485,10 @@ def main():
             old_size  = tile_size
             tile_size += (target_tile_size - tile_size) * min(1.0, ZOOM_LERP * dt)
             tile_size  = max(TILE_SIZE_MIN, min(TILE_SIZE_MAX, tile_size))
-            cam_x, cam_y = zoom_camera(cam_x, cam_y, old_size, tile_size, screen_w, screen_h)
+            cam_x, cam_y = zoom_camera(
+                cam_x, cam_y, old_size, tile_size, screen_w, screen_h,
+                anchor_sx=zoom_anchor_x, anchor_sy=zoom_anchor_y
+            )
         elif state == STATE_PLAY:
             tile_size = target_tile_size
 
@@ -481,7 +528,7 @@ def main():
             new_sheep: list[Sheep] = []
             for sheep in sheep_list:
                 sheep.update(dt_sim, grid, regrowth_timers, sheep_list, new_sheep,
-                             dirty_callback=terrain_renderer.mark_dirty)
+                             dirty_callback=mark_terrain_changed)
             # Remove sheep that died this frame, then add all offspring
             sheep_list = [s for s in sheep_list if s.alive]
             sheep_list.extend(new_sheep)
@@ -493,13 +540,13 @@ def main():
                     r, c = pos
                     if 0 <= r < len(grid) and 0 <= c < len(grid[0]):
                         grid[r][c] = GRASS
-                        terrain_renderer.mark_dirty(r, c)
+                        mark_terrain_changed(r, c)
                     del regrowth_timers[pos]
 
-            terrain_renderer.update(dt_sim)
-
             if grass_spread is not None:
-                grass_spread.update(dt_sim, notify=terrain_renderer.mark_dirty)
+                grass_spread.update(dt_sim, notify=mark_terrain_changed)
+
+            terrain_renderer.update(dt_sim)
 
         # --- Render ---
         if state == STATE_TITLE:
@@ -531,13 +578,28 @@ def main():
             living        = [s for s in sheep_list if getattr(s, 'dead_state', None) is None]
             living_count  = len(living)
             ram_count     = sum(1 for s in living if isinstance(s, Ram))
-            wolf_living   = sum(1 for w in wolf_list
-                                if w.alive and w.dead_state is None)
+            ewe_count     = living_count - ram_count
+            living_wolves = [w for w in wolf_list if w.alive and w.dead_state is None]
+            wolf_living   = len(living_wolves)
+            wolf_female_count = sum(1 for w in living_wolves if getattr(w, "sex", "") == "female")
+            wolf_male_count = sum(1 for w in living_wolves if getattr(w, "sex", "") == "male")
+            herd_count = len(getattr(herd_manager, "_herds", {}))
+            pack_count = len(getattr(wolf_pack_manager, "_packs", {}))
+            stats_lines = [
+                f"Herds: {herd_count}",
+                f"Packs: {pack_count}",
+                f"Female sheep: {ewe_count}",
+                f"Male sheep: {ram_count}",
+                f"Female wolves: {wolf_female_count}",
+                f"Male wolves: {wolf_male_count}",
+            ]
             draw_play_ui(screen, font_ui, back_btn, sheep_btn, wolf_btn,
                          sheep_tool, wolf_tool,
                          current_seed, tile_size, screen_w, screen_h, is_fullscreen,
                          living_count, speed_btns, sim_speed_idx, day_number,
-                         ram_count=ram_count, wolf_count=wolf_living)
+                         ram_count=ram_count, wolf_count=wolf_living,
+                         wolf_female_count=wolf_female_count, wolf_male_count=wolf_male_count,
+                         stats_btn=stats_btn, stats_open=stats_open, stats_lines=stats_lines)
 
             if (sheep_tool or wolf_tool) and mouse_pos[1] < screen_h - BOTTOM_BAR_H:
                 mx, my = mouse_pos

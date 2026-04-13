@@ -42,8 +42,13 @@ FERTILIZE_RADIUS         = 3       # tile radius of fertilizer effect when corps
 FERTILIZE_REGROWTH       = 60.0    # fast regrowth time (seconds) on fertilized tiles
 
 # Wolf / predator
-MEAT_PER_SIZE_UNIT       = 6.0     # meat_value = genetic_size * this; set on death
+MEAT_PER_SIZE_UNIT       = 0.95    # corpse meat scales with body size and HP
 WOLF_FEAR_WEIGHT         = 14.0    # how strongly wolf flee direction overrides normal walk
+FLEE_HERD_WEIGHT         = 1.4
+FLEE_GRASS_WEIGHT        = 0.45
+PROTECTOR_PULL_WEIGHT    = 2.1
+GRASS_PULL_WEIGHT        = 1.2
+OFF_GRASS_PULL_WEIGHT    = 2.6
 
 # ---------------------------------------------------------------------------
 # Lifespan  (13–21 days with heritable variation; +3 days average vs. old 10–18)
@@ -86,6 +91,7 @@ PARENT_AGE_CUTOFF    = 600.0   # 2 days — parent bond fades linearly to zero
 # ---------------------------------------------------------------------------
 AWARENESS_RADIUS   = 28.0
 MATE_SEARCH_RADIUS = 20.0
+PROTECTOR_SEARCH_RADIUS = 36.0
 
 # ---------------------------------------------------------------------------
 # Reproduction
@@ -224,6 +230,7 @@ class Sheep:
 
         # Parent reference — set at birth; None for initial placed sheep
         self.parent: "Sheep | None" = None
+        self.mate_partner: "Sheep | None" = None
 
         # Herd influence — written by HerdManager every frame
         self.herd_cx            = self.tx   # herd center of mass x (tile coords)
@@ -252,6 +259,9 @@ class Sheep:
         self.death_timer  = 0.0
         self.death_facing = "right"   # facing direction recorded at moment of death
         self.meat_value   = 0.0       # set to genetic_size * MEAT_PER_SIZE_UNIT on death
+        self.max_meat_value = 0.0
+        self.corpse_decay_rate = 1.0
+        self._corpse_slot_count = 4
 
         # Wolf fear — written by Wolf.update() when a wolf is hunting nearby
         self.wolf_aware       = False
@@ -280,6 +290,21 @@ class Sheep:
     def size_scale(self) -> float:
         growth = 0.5 + 0.5 * min(1.0, self.age / self.maturity_age)
         return growth * self.genetic_size
+
+    @property
+    def age_decline_frac(self) -> float:
+        start = self.lifespan * 0.50
+        if self.age <= start:
+            return 0.0
+        return min(1.0, (self.age - start) / max(1.0, self.lifespan - start))
+
+    @property
+    def max_hp(self) -> float:
+        return float(self.genetic_hp) * (1.0 - self.age_decline_frac * 0.35)
+
+    @property
+    def move_speed(self) -> float:
+        return self.speed * (1.0 - self.age_decline_frac * 0.28)
 
     @property
     def _reproduce_threshold(self) -> float:
@@ -401,11 +426,25 @@ class Sheep:
 
         # --- Wolf flee: overrides all other movement when scared ---
         if self.wolf_aware and (self.wolf_flee_dx != 0.0 or self.wolf_flee_dy != 0.0):
-            self.dx = self.wolf_flee_dx
-            self.dy = self.wolf_flee_dy
+            fx = self.wolf_flee_dx
+            fy = self.wolf_flee_dy
+            if self.herd_id >= 0:
+                hdx = self.herd_cx - self.tx
+                hdy = self.herd_cy - self.ty
+                hdist = math.hypot(hdx, hdy)
+                if hdist > 0.25:
+                    fx += (hdx / hdist) * 0.25
+                    fy += (hdy / hdist) * 0.25
+            mag = math.hypot(fx, fy)
+            if mag > 0.0:
+                self.dx = fx / mag
+                self.dy = fy / mag
+            else:
+                self.dx = self.wolf_flee_dx
+                self.dy = self.wolf_flee_dy
             self._refresh_facing()
             self.state = Sheep.WALK
-            self.timer = random.uniform(2.0, 4.5)
+            self.timer = random.uniform(3.4, 5.4)
             return
 
         # --- Base random direction ---
@@ -730,6 +769,43 @@ class Sheep:
 
         return (best_dx, best_dy) if found else None
 
+    def _find_protective_male(self, flock: list):
+        if self.sex != "female":
+            return None
+
+        preferred = getattr(self, "mate_partner", None)
+        if (preferred is not None
+                and preferred.alive
+                and preferred.dead_state is None
+                and getattr(preferred, "sex", "female") == "male"):
+            ddx = preferred.tx - self.tx
+            ddy = preferred.ty - self.ty
+            dist_sq = ddx * ddx + ddy * ddy
+            if 0.0 < dist_sq <= PROTECTOR_SEARCH_RADIUS * PROTECTOR_SEARCH_RADIUS:
+                dist = math.sqrt(dist_sq)
+                return preferred, ddx / dist, ddy / dist, dist
+
+        best_score = float("inf")
+        best = None
+        for other in flock:
+            if other is self or other.dead_state is not None or not other.is_adult:
+                continue
+            if getattr(other, "sex", "female") != "male":
+                continue
+            ddx = other.tx - self.tx
+            ddy = other.ty - self.ty
+            dist_sq = ddx * ddx + ddy * ddy
+            if dist_sq <= 0.0 or dist_sq > PROTECTOR_SEARCH_RADIUS * PROTECTOR_SEARCH_RADIUS:
+                continue
+            dist = math.sqrt(dist_sq)
+            same_herd_bias = -6.0 if self.herd_id >= 0 and other.herd_id == self.herd_id else 0.0
+            fertile_bias = -2.0 if other.hunger < other._reproduce_threshold else 0.0
+            score = dist + same_herd_bias + fertile_bias
+            if score < best_score:
+                best_score = score
+                best = (other, ddx / dist, ddy / dist, dist)
+        return best
+
     # ------------------------------------------------------------------
     # Reproduction — now sets pregnancy instead of immediate birth
     # ------------------------------------------------------------------
@@ -800,6 +876,8 @@ class Sheep:
             self.gestation_timer        = base_gestation * (1.0 + nutrition_delay)
             self._gestation_hunger_mult = GESTATION_HUNGER_BASE + GESTATION_HUNGER_SCALE * (litter_count - 1)
             self._pending_litter        = pending
+            self.mate_partner = other
+            other.mate_partner = self
 
             self.reproduce_cooldown  = REPRODUCE_COOLDOWN
             # Males get a brief cooldown so they can keep mating with other females
@@ -846,8 +924,11 @@ class Sheep:
 
     def _die(self):
         """Transition a living sheep into the fresh-corpse state."""
+        corpse_meat = max(6.0, self.genetic_size * self.genetic_hp * MEAT_PER_SIZE_UNIT)
+        if self.age < self.maturity_age:
+            corpse_meat *= 0.5
         self.dead_state   = "fresh"
-        self.death_timer  = random.uniform(CORPSE_FRESH_MIN, CORPSE_FRESH_MAX)
+        self.death_timer  = DAY_DURATION * (1.25 + 0.018 * self.genetic_hp + 0.30 * self.genetic_size)
         self.death_facing = self.facing
         # Stop movement — corpse is inert
         self.state = Sheep.IDLE
@@ -857,13 +938,21 @@ class Sheep:
         self.herd_id        = -1
         self.pregnant       = False
         self._pending_litter = []
-        # Meat available to wolves — scales with body size
-        self.meat_value = self.genetic_size * MEAT_PER_SIZE_UNIT
+        # Meat available to wolves — scales with body size and vitality
+        self.meat_value = corpse_meat
+        self.max_meat_value = corpse_meat
+        self.corpse_decay_rate = 1.0
+        if self.age < self.maturity_age:
+            self._corpse_slot_count = 2
+        else:
+            self._corpse_slot_count = 4
+        self._max_eaters = self._corpse_slot_count
 
     def _update_corpse(self, dt: float, grid: list, regrowth_timers: dict,
                        dirty_callback=None):
         """Tick the corpse state machine."""
-        self.death_timer -= dt
+        self.death_timer -= dt * max(1.0, self.corpse_decay_rate)
+        self.corpse_decay_rate = 1.0
         if self.death_timer > 0:
             return
 
@@ -955,6 +1044,8 @@ class Sheep:
         row  = int(self.ty)
         on_map   = 0 <= row < rows and 0 <= col < cols
         on_grass = on_map and grid[row][col] == GRASS
+        grass_dir = self._find_herd_grass(grid, rows, cols)
+        protector = self._find_protective_male(flock)
 
         urgency = 0.0
         if self.hunger >= HUNGER_URGENCY_THRESHOLD:
@@ -965,7 +1056,7 @@ class Sheep:
         # --- EAT ---
         if self.state == Sheep.EAT:
             self.hunger = max(0.0, self.hunger - EAT_RATE * dt)
-            self.hp = min(float(self.genetic_hp), self.hp + HP_EAT_REGEN * dt)
+            self.hp = min(self.max_hp, self.hp + HP_EAT_REGEN * dt)
             if self.timer <= 0 or self.hunger <= 0.1:
                 self._schedule_idle()
             return
@@ -1056,10 +1147,18 @@ class Sheep:
                             self._refresh_facing()
                             return
 
+                if (not on_grass and grass_dir is not None
+                        and self.hunger < HUNGER_THRESHOLD * 0.95):
+                    self.state = Sheep.WALK
+                    self.dx, self.dy = grass_dir
+                    self.timer = random.uniform(1.6, 2.6)
+                    self._refresh_facing()
+                    return
+
                 if not self._try_follow(flock):
                     if self.hunger >= HUNGER_THRESHOLD * 0.7:
                         # Prefer grass within herd territory; only wander outside if solo
-                        direction = self._find_herd_grass(grid, rows, cols)
+                        direction = grass_dir
                         if direction:
                             self.state = Sheep.WALK
                             self.dx, self.dy = direction
@@ -1091,9 +1190,42 @@ class Sheep:
                     sx += (hpx / hpdist) * pull_mag
                     sy += (hpy / hpdist) * pull_mag
 
+            if grass_dir is not None:
+                gx, gy = grass_dir
+                grass_weight = OFF_GRASS_PULL_WEIGHT if not on_grass else GRASS_PULL_WEIGHT
+                if self.wolf_aware:
+                    grass_weight *= 0.2
+                sx += gx * grass_weight * dt
+                sy += gy * grass_weight * dt
+
+            if protector is not None:
+                _, pdx, pdy, pdist = protector
+                separated = (self.herd_id < 0
+                             or pdist > 4.0
+                             or math.hypot(self.herd_cx - self.tx, self.herd_cy - self.ty)
+                             > self.herd_awareness_r * 0.45)
+                if separated and not self.wolf_aware:
+                    protector_pull = PROTECTOR_PULL_WEIGHT * dt
+                    sx += pdx * protector_pull
+                    sy += pdy * protector_pull
+
+            if self.wolf_aware:
+                herd_dx = self.herd_cx - self.tx
+                herd_dy = self.herd_cy - self.ty
+                herd_dist = math.hypot(herd_dx, herd_dy)
+                if herd_dist > 2.2:
+                    sx += (herd_dx / herd_dist) * FLEE_HERD_WEIGHT * dt
+                    sy += (herd_dy / herd_dist) * FLEE_HERD_WEIGHT * dt
+
+                if grass_dir is not None and not on_grass:
+                    gx, gy = grass_dir
+                    sx += gx * FLEE_GRASS_WEIGHT * dt
+                    sy += gy * FLEE_GRASS_WEIGHT * dt
+
             speed_mult = 1.0 + urgency * 1.8
-            new_tx = self.tx + self.dx * self.speed * speed_mult * dt + sx
-            new_ty = self.ty + self.dy * self.speed * speed_mult * dt + sy
+            fear_mult = 2.0 if self.wolf_aware else 1.0
+            new_tx = self.tx + self.dx * self.move_speed * speed_mult * fear_mult * dt + sx
+            new_ty = self.ty + self.dy * self.move_speed * speed_mult * fear_mult * dt + sy
 
             ncol = int(new_tx)
             nrow = int(new_ty)
@@ -1138,11 +1270,11 @@ class Sheep:
         screen.blit(sprite, (sx, sy))
 
         # HP bar — shown only when injured
-        if self.dead_state is None and self.hp < float(self.genetic_hp):
+        if self.dead_state is None and self.hp < self.max_hp:
             bar_w   = w
             bar_h   = max(2, round(effective_ts) // 7)
             bar_y   = sy - bar_h - 2
-            hp_frac = max(0.0, self.hp / float(self.genetic_hp))
+            hp_frac = max(0.0, self.hp / self.max_hp)
             filled  = int(bar_w * hp_frac)
             pygame.draw.rect(screen, (40, 40, 40), (sx, bar_y, bar_w, bar_h))
             rc = int((1.0 - hp_frac) * 220)

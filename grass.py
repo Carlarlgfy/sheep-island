@@ -381,9 +381,10 @@ class TerrainRenderer:
 # Grass spreading (frontier BFS)
 # ---------------------------------------------------------------------------
 
-# Tiles converted per sim-second at 1× speed (20% slower than original 8).
-# Scales with sim speed (3×, 8×) automatically.
-_SPREAD_RATE = 5.76
+# Tiles converted per sim-second at 1× speed.
+# A fractional budget is accumulated over time so spread stays smooth and
+# actually honors this rate instead of converting at least one tile per frame.
+_SPREAD_RATE = 1.8
 
 
 class GrassSpread:
@@ -397,6 +398,7 @@ class GrassSpread:
         self.grid = grid
         self.rows = len(grid)
         self.cols = len(grid[0]) if self.rows else 0
+        self._spread_budget = 0.0
         # Seed the frontier: every dirt tile that touches at least one grass tile
         self.frontier: set[tuple[int, int]] = set()
         for r in range(self.rows):
@@ -407,18 +409,45 @@ class GrassSpread:
     # ------------------------------------------------------------------
 
     def _borders_grass(self, r: int, c: int) -> bool:
-        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
+        for dr, dc in self._neighbor_offsets():
             nr, nc = r + dr, c + dc
             if 0 <= nr < self.rows and 0 <= nc < self.cols:
                 if self.grid[nr][nc] == GRASS:
                     return True
         return False
 
+    def _neighbor_offsets(self):
+        return (
+            (-1, -1), (-1, 0), (-1, 1),
+            (0, -1),           (0, 1),
+            (1, -1),  (1, 0),  (1, 1),
+        )
+
+    def on_tile_changed(self, r: int, c: int):
+        """Refresh frontier membership for a changed tile and nearby tiles.
+
+        Grass spread depends on local grass/dirt adjacency, so any terrain
+        change must rescan the tile and its neighbors. This keeps the frontier
+        accurate after sheep eat grass, grass regrows, or spread fills a tile.
+        """
+        for dr, dc in ((0, 0), *self._neighbor_offsets()):
+            nr, nc = r + dr, c + dc
+            if not (0 <= nr < self.rows and 0 <= nc < self.cols):
+                continue
+            if self.grid[nr][nc] == DIRT and self._borders_grass(nr, nc):
+                self.frontier.add((nr, nc))
+            else:
+                self.frontier.discard((nr, nc))
+
     def update(self, dt_sim: float, notify=None):
         if dt_sim <= 0 or not self.frontier:
             return
 
-        n = max(1, int(_SPREAD_RATE * dt_sim))
+        self._spread_budget += _SPREAD_RATE * dt_sim
+        n = int(self._spread_budget)
+        if n <= 0:
+            return
+        self._spread_budget -= n
         candidates = random.sample(list(self.frontier), min(n, len(self.frontier)))
 
         for (r, c) in candidates:
@@ -427,11 +456,6 @@ class GrassSpread:
                 continue
             # Convert this tile and add its dirt neighbours to the frontier
             self.grid[r][c] = GRASS
-            self.frontier.discard((r, c))
             if notify:
                 notify(r, c)
-            for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1)):
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < self.rows and 0 <= nc < self.cols:
-                    if self.grid[nr][nc] == DIRT:
-                        self.frontier.add((nr, nc))
+            self.on_tile_changed(r, c)
