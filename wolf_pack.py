@@ -21,15 +21,21 @@ import random
 # Tuning
 # ---------------------------------------------------------------------------
 
-PACK_PROXIMITY      = 18.0   # tiles — max distance to share a pack
-REASSIGN_INTERVAL   = 12.0   # sim-seconds between proximity reassignments
+PACK_PROXIMITY      = 22.0   # tiles — max distance to share a pack
+REASSIGN_INTERVAL   = 8.0    # sim-seconds between proximity reassignments
 
 # Hunt coordination
-PACK_TARGET_SCAN_INTERVAL = 8.0   # seconds between pack-level prey rescans
-PACK_TARGET_RADIUS        = 65.0  # tile radius for pack-level prey search
+PACK_TARGET_SCAN_INTERVAL = 8.0    # seconds between pack-level prey rescans
+PACK_TARGET_RADIUS        = 600.0  # tile radius for pack-level prey (hearing range)
+PACK_SMELL_RADIUS         = 1000.0 # tile radius for pack-level corpse detection
 
 # Wolf threat alarm pushed to herd manager (tile radius around pack center)
 WOLF_ALARM_RADIUS   = 45.0
+
+# Pack awareness radius (written to each wolf as pack_awareness_radius)
+PACK_AWARENESS_BASE     = 30.0   # tiles — baseline for a lone wolf
+PACK_AWARENESS_PER_WOLF = 2.5    # extra tiles per additional pack member
+PACK_AWARENESS_MAX      = 65.0   # cap
 
 
 # ---------------------------------------------------------------------------
@@ -37,14 +43,15 @@ WOLF_ALARM_RADIUS   = 45.0
 # ---------------------------------------------------------------------------
 
 class _PackData:
-    __slots__ = ("cx", "cy", "size", "hunt_target", "scan_timer")
+    __slots__ = ("cx", "cy", "size", "hunt_target", "scan_timer", "awareness_radius")
 
     def __init__(self):
-        self.cx          = 0.0
-        self.cy          = 0.0
-        self.size        = 0
-        self.hunt_target = None   # shared prey target
-        self.scan_timer  = random.uniform(0, PACK_TARGET_SCAN_INTERVAL)
+        self.cx               = 0.0
+        self.cy               = 0.0
+        self.size             = 0
+        self.hunt_target      = None   # shared prey target
+        self.scan_timer       = random.uniform(0, PACK_TARGET_SCAN_INTERVAL)
+        self.awareness_radius = PACK_AWARENESS_BASE
 
 
 # ---------------------------------------------------------------------------
@@ -169,15 +176,22 @@ class WolfPackManager:
             n  = len(members)
             cx = sum(w.tx for w in members) / n
             cy = sum(w.ty for w in members) / n
-            data.cx   = cx
-            data.cy   = cy
-            data.size = n
+            data.cx               = cx
+            data.cy               = cy
+            data.size             = n
+            data.awareness_radius = min(PACK_AWARENESS_MAX,
+                                        PACK_AWARENESS_BASE + (n - 1) * PACK_AWARENESS_PER_WOLF)
 
             # Validate shared hunt target
+            # A fresh corpse with meat is still a valid target; only discard when
+            # the animal is dead AND not a useful fresh corpse.
             ht = data.hunt_target
-            if ht is not None and (not ht.alive or ht.dead_state is not None):
-                data.hunt_target = None
-                ht = None
+            if ht is not None:
+                is_fresh_corpse = (ht.dead_state == "fresh"
+                                   and getattr(ht, 'meat_value', 0.0) > 0)
+                if not is_fresh_corpse and (not ht.alive or ht.dead_state is not None):
+                    data.hunt_target = None
+                    ht = None
 
             # Periodic pack-level prey scan
             data.scan_timer -= dt
@@ -192,10 +206,11 @@ class WolfPackManager:
 
             # Push attributes onto all pack members
             for w in members:
-                w.pack_cx          = data.cx
-                w.pack_cy          = data.cy
-                w.pack_size        = data.size
-                w.pack_hunt_target = data.hunt_target
+                w.pack_cx               = data.cx
+                w.pack_cy               = data.cy
+                w.pack_size             = data.size
+                w.pack_hunt_target      = data.hunt_target
+                w.pack_awareness_radius = data.awareness_radius
 
     # ------------------------------------------------------------------
     # Pack-level prey selection
@@ -203,7 +218,33 @@ class WolfPackManager:
 
     def _find_pack_prey(self, cx: float, cy: float,
                         sheep_list: list, scan_r_sq: float):
-        """Best live-sheep target closest to pack center with priority scoring."""
+        """Best target for the pack: fresh corpses first, then live prey via hearing.
+
+        Corpses are detectable at PACK_SMELL_RADIUS (1000 tiles).
+        Live moving prey are detectable at PACK_TARGET_RADIUS (600 tiles, hearing).
+        Live stationary prey are detectable at 150 tiles (passive scent).
+        """
+        smell_sq  = PACK_SMELL_RADIUS ** 2
+        scent_sq  = 150.0 ** 2   # stationary live prey
+
+        # --- Corpse priority ---
+        best_corpse_dist = float('inf')
+        best_corpse      = None
+        for sheep in sheep_list:
+            if sheep.dead_state != "fresh":
+                continue
+            if getattr(sheep, 'meat_value', 0.0) <= 0:
+                continue
+            ddx     = sheep.tx - cx
+            ddy     = sheep.ty - cy
+            dist_sq = ddx * ddx + ddy * ddy
+            if dist_sq <= smell_sq and dist_sq < best_corpse_dist:
+                best_corpse_dist = dist_sq
+                best_corpse      = sheep
+        if best_corpse is not None:
+            return best_corpse
+
+        # --- Live prey (hearing for moving, passive scent for stationary) ---
         best_score   = -1.0
         best_target  = None
         best_dist_sq = float('inf')
@@ -214,10 +255,12 @@ class WolfPackManager:
             ddx     = sheep.tx - cx
             ddy     = sheep.ty - cy
             dist_sq = ddx * ddx + ddy * ddy
-            if dist_sq > scan_r_sq:
+
+            is_moving = (abs(getattr(sheep, 'dx', 0.0)) + abs(getattr(sheep, 'dy', 0.0))) > 0.01
+            limit_sq  = scan_r_sq if is_moving else scent_sq
+            if dist_sq > limit_sq:
                 continue
 
-            # Vulnerability score
             score = 0.0
             if hasattr(sheep, 'maturity_age'):
                 if sheep.age < sheep.maturity_age:

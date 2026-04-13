@@ -75,6 +75,14 @@ DIRT_SCAN_RADIUS       = 10     # tile radius inspected around herd center
 DIRT_MIGRATE_THRESHOLD = 0.65   # migrate when >65% of non-water/sand land is dirt
 
 # ---------------------------------------------------------------------------
+# Wolf awareness and flee
+# ---------------------------------------------------------------------------
+SHEEP_WOLF_AWARENESS_R    = 50.0   # tiles — individual sheep spot any wolf within this range
+SHEEP_WOLF_SPOOK_FRAC     = 0.20   # fraction of herd that must be wolf_aware to trigger flee
+SHEEP_FLEE_MIN_DIST       = 80.0   # tiles — minimum flee-migration distance from wolf threat
+SHEEP_CORPSE_AVOID_DIST   = 50.0   # tiles — flee target penalty radius around corpses / wolves
+
+# ---------------------------------------------------------------------------
 # Death-panic migration  (exponential urgency as herd members die)
 # ---------------------------------------------------------------------------
 DEATH_SCAN_RADIUS      = 35.0   # tile radius to count nearby corpses for panic
@@ -352,15 +360,19 @@ class HerdManager:
 
     def _pick_migration_target(self, cx: float, cy: float,
                                awareness_r: float,
-                               flee_mult: float = 1.0) -> tuple[float, float]:
+                               flee_mult: float = 1.0,
+                               avoid_positions: list = None,
+                               min_dist: float = 0.0) -> tuple[float, float]:
         """
         Sample 3–4 candidate patches spread evenly across 360°, each at
         distance awareness_r×2×flee_mult from the herd center.  Score each by
         the number of grass tiles in a 5×5 window around the candidate.
-        flee_mult > 1 means the herd is fleeing deaths and should migrate farther.
+        flee_mult > 1 means the herd is fleeing and should migrate farther.
+        avoid_positions: list of (x, y) points to steer away from (wolves, corpses).
+        min_dist: minimum candidate distance regardless of awareness_r.
         """
         grid = self._grid
-        target_dist = max(20.0, awareness_r * 2.0) * flee_mult
+        target_dist = max(min_dist, max(20.0, awareness_r * 2.0) * flee_mult)
 
         if grid is None:
             angle = random.uniform(0, 2 * math.pi)
@@ -371,7 +383,7 @@ class HerdManager:
 
         n_candidates = random.randint(3, 4)
         base_angle   = random.uniform(0, 2 * math.pi)
-        candidates   = []   # (px, py, grass_count)
+        candidates   = []   # (px, py, grass_count, avoid_penalty)
 
         for i in range(n_candidates):
             angle = base_angle + i * (2 * math.pi / n_candidates)
@@ -391,18 +403,27 @@ class HerdManager:
                     if 0 <= r < rows and 0 <= c < cols and grid[r][c] == GRASS:
                         grass_count += 1
 
-            candidates.append((px, py, grass_count))
+            # Penalty for being near wolves or corpses
+            avoid_penalty = 0.0
+            if avoid_positions:
+                for ax, ay in avoid_positions:
+                    d = math.sqrt((px - ax) ** 2 + (py - ay) ** 2)
+                    if d < SHEEP_CORPSE_AVOID_DIST:
+                        avoid_penalty += (SHEEP_CORPSE_AVOID_DIST - d) / SHEEP_CORPSE_AVOID_DIST * 3.0
 
-        # Build weights — heavily penalize zero-grass patches when alternatives exist
-        max_grass = max(g for _, _, g in candidates)
+            candidates.append((px, py, grass_count, avoid_penalty))
+
+        # Build weights — grass density bonus, avoid-penalty malus
+        max_grass = max(g for _, _, g, _ in candidates)
         weights   = []
-        for _, _, gc in candidates:
+        for _, _, gc, ap in candidates:
             if max_grass > 0 and gc == 0:
                 w = 0.02          # nearly impossible to choose a barren patch
             elif max_grass == 0:
                 w = 1.0           # all equally unknown — pure random
             else:
                 w = 0.1 + (gc / max_grass) * 2.0   # 0.1..2.1 proportional to density
+            w = max(0.01, w - ap * 0.5)             # penalise proximity to threats
             weights.append(w)
 
         # Weighted random pick
@@ -495,26 +516,26 @@ class HerdManager:
 
     def _apply_wolf_threat(self, animals: list, wolves: list):
         """
-        For each hunting wolf close to a herd, trigger an emergency flee
-        migration away from the wolf.  Individual sheep also get wolf_aware
-        set so their personal _schedule_walk overrides to flee direction.
+        Each sheep individually checks whether any wolf is within
+        SHEEP_WOLF_AWARENESS_R tiles.  If ≥ SHEEP_WOLF_SPOOK_FRAC of the herd
+        is spooked, the herd flees to a grass patch far from wolves and corpses.
         """
-        WOLF_ALARM_R_SQ = 40.0 ** 2   # herd center within 40 tiles of a hunting wolf
+        from wolf import Wolf as _Wolf, WOLF_SCARE_DURATION as _SCARE_DUR
 
-        # Collect hunting wolf positions
-        threat_positions = []
-        for w in wolves:
-            if w.dead_state is not None or not w.alive:
-                continue
-            # Import locally to avoid circular import at module load
-            from wolf import Wolf as _Wolf
-            if w.state in (_Wolf.HUNT, _Wolf.LUNGE):
-                threat_positions.append((w.tx, w.ty))
-
-        if not threat_positions:
+        # All living wolves — any wolf is a threat, not just hunting ones
+        wolf_positions = [(w.tx, w.ty) for w in wolves
+                          if w.alive and w.dead_state is None]
+        if not wolf_positions:
             return
 
-        # Group sheep by herd
+        # Corpse positions to steer the flee target away from
+        corpse_positions = [(c.tx, c.ty)
+                            for c in getattr(self, '_recent_corpses', [])
+                            if getattr(c, 'dead_state', None) is not None]
+
+        awareness_sq = SHEEP_WOLF_AWARENESS_R ** 2
+
+        # Group living sheep by herd
         by_herd: dict[int, list] = {}
         for a in animals:
             if a.herd_id >= 0:
@@ -526,48 +547,52 @@ class HerdManager:
                 continue
             cx, cy = data.cx, data.cy
 
-            # Find the nearest threatening wolf to this herd center
-            nearest_sq   = float('inf')
-            nearest_wx   = cx
-            nearest_wy   = cy
-            for wx, wy in threat_positions:
-                d_sq = (wx - cx) ** 2 + (wy - cy) ** 2
-                if d_sq < nearest_sq:
-                    nearest_sq = d_sq
-                    nearest_wx = wx
-                    nearest_wy = wy
+            # Per-sheep awareness: find nearest threatening wolf for each sheep
+            nearest_wolf_sq = float('inf')
+            nearest_wx, nearest_wy = cx, cy
 
-            if nearest_sq > WOLF_ALARM_R_SQ:
-                continue
-
-            # Flee direction: away from wolf
-            fdx = cx - nearest_wx
-            fdy = cy - nearest_wy
-            fd  = math.sqrt(fdx * fdx + fdy * fdy)
-            if fd == 0:
-                continue
-            fdx /= fd; fdy /= fd
-
-            # Emergency flee migration away from wolf
-            if data.state != _HerdData.MIGRATING:
-                # Pick a target far away from the wolf
-                flee_dist = max(data.awareness_r * 1.8, 30.0)
-                mtx = cx + fdx * flee_dist
-                mty = cy + fdy * flee_dist
-                data.mtx   = mtx
-                data.mty   = mty
-                data.state = _HerdData.MIGRATING
-                data.timer = 45.0
-                data.emergency = True
-
-            # Set wolf_aware on every herd member
-            from wolf import WOLF_SCARE_DURATION as _SCARE_DUR
             for a in members:
-                a.wolf_aware       = True
-                a._wolf_fear_timer = max(getattr(a, '_wolf_fear_timer', 0.0),
-                                         _SCARE_DUR)
-                a.wolf_flee_dx     = fdx
-                a.wolf_flee_dy     = fdy
+                for wx, wy in wolf_positions:
+                    d_sq = (wx - a.tx) ** 2 + (wy - a.ty) ** 2
+                    if d_sq <= awareness_sq:
+                        # This sheep spots a wolf — mark it spooked
+                        a.wolf_aware       = True
+                        a._wolf_fear_timer = max(getattr(a, '_wolf_fear_timer', 0.0),
+                                                 _SCARE_DUR)
+                        dd = math.sqrt(d_sq)
+                        if dd > 0.001:
+                            a.wolf_flee_dx = (a.tx - wx) / dd
+                            a.wolf_flee_dy = (a.ty - wy) / dd
+                        if d_sq < nearest_wolf_sq:
+                            nearest_wolf_sq = d_sq
+                            nearest_wx, nearest_wy = wx, wy
+                        break  # one close wolf is enough to spook this sheep
+
+            # Count currently spooked sheep in this herd
+            spooked = sum(1 for a in members if getattr(a, 'wolf_aware', False))
+            if spooked == 0:
+                continue
+
+            spook_frac = spooked / len(members)
+            if spook_frac < SHEEP_WOLF_SPOOK_FRAC:
+                continue   # not enough sheep alarmed yet
+
+            # Enough sheep are spooked — trigger a flee migration if not already fleeing
+            if data.state == _HerdData.MIGRATING:
+                continue
+
+            avoid_pts = list(wolf_positions) + corpse_positions
+            mtx, mty  = self._pick_migration_target(
+                cx, cy, data.awareness_r,
+                flee_mult=2.5,
+                avoid_positions=avoid_pts,
+                min_dist=SHEEP_FLEE_MIN_DIST,
+            )
+            data.mtx       = mtx
+            data.mty       = mty
+            data.state     = _HerdData.MIGRATING
+            data.timer     = 60.0
+            data.emergency = True
 
     # ------------------------------------------------------------------
     # Per-frame herd state machine + attribute injection
@@ -576,6 +601,7 @@ class HerdManager:
     def _update_herds(self, dt: float, animals: list, corpses: list = None):
         if corpses is None:
             corpses = []
+        self._recent_corpses = corpses   # expose for _apply_wolf_threat
 
         # Group by herd id
         by_herd: dict[int, list] = {}
