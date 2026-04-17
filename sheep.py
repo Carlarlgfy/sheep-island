@@ -1252,9 +1252,10 @@ class Sheep:
             key = f"eat_{self.facing}" if self.state == Sheep.EAT else self.facing
 
         effective_ts = tile_size * self.size_scale
-        ts           = max(1, round(tile_size))
-        sx_center    = int(self.tx * ts - cam_x)
-        sy_center    = int(self.ty * ts - cam_y)
+        sx_center_f  = self.tx * tile_size - cam_x
+        sy_center_f  = self.ty * tile_size - cam_y
+        sx_center    = round(sx_center_f)
+        sy_center    = round(sy_center_f)
 
         # --- LOD: flat colored dot when zoomed far out ---
         if tile_size < Sheep.LOD_THRESHOLD:
@@ -1265,8 +1266,8 @@ class Sheep:
 
         sprite = self._scaled(key, effective_ts)
         w, h   = sprite.get_size()
-        sx     = sx_center - w // 2
-        sy     = sy_center - h // 2
+        sx     = round(sx_center_f - w / 2)
+        sy     = round(sy_center_f - h / 2)
         screen.blit(sprite, (sx, sy))
 
         # HP bar — shown only when injured

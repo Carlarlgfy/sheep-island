@@ -24,7 +24,6 @@ CONTINENT_TILE_DEFAULT      = 8.0
 TILE_SIZE_MIN               = 2.0
 TILE_SIZE_MAX               = 48.0
 ZOOM_FACTOR                 = 1.1
-ZOOM_LERP                   = 18.0
 CAMERA_SPEED                = 55
 
 STATE_TITLE      = "title"
@@ -173,7 +172,6 @@ def _inflate_hull(hull, cx, cy, pad):
 def draw_group_overlays(screen, overlay_surf, cam_x, cam_y, tile_size,
                         sheep_list, wolf_list):
     sw, sh = screen.get_size()
-    ts = max(1, round(tile_size))
 
     if overlay_surf[0] is None or overlay_surf[0].get_size() != (sw, sh):
         overlay_surf[0] = pygame.Surface((sw, sh), pygame.SRCALPHA)
@@ -189,7 +187,7 @@ def draw_group_overlays(screen, overlay_surf, cam_x, cam_y, tile_size,
             herds.setdefault(hid, []).append(s)
 
     for members in herds.values():
-        pts = [(m.tx * ts - cam_x, m.ty * ts - cam_y) for m in members]
+        pts = [(m.tx * tile_size - cam_x, m.ty * tile_size - cam_y) for m in members]
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
 
@@ -224,7 +222,7 @@ def draw_group_overlays(screen, overlay_surf, cam_x, cam_y, tile_size,
             packs.setdefault(pid, []).append(w)
 
     for members in packs.values():
-        pts = [(m.tx * ts - cam_x, m.ty * ts - cam_y) for m in members]
+        pts = [(m.tx * tile_size - cam_x, m.ty * tile_size - cam_y) for m in members]
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
 
@@ -385,19 +383,12 @@ def clamp_camera(cam_x, cam_y, tile_size, screen_w, screen_h,
     return cam_x, cam_y
 
 
-def zoom_camera(cam_x, cam_y, old_size, new_size, screen_w, screen_h,
-                anchor_sx=None, anchor_sy=None,
-                map_w=ISLAND_W, map_h=ISLAND_H):
-    scale    = new_size / old_size
-    if anchor_sx is None:
-        anchor_sx = screen_w // 2
-    if anchor_sy is None:
-        anchor_sy = screen_h // 2
-    world_x  = cam_x + anchor_sx
-    world_y  = cam_y + anchor_sy
-    cam_x    = world_x * scale - anchor_sx
-    cam_y    = world_y * scale - anchor_sy
-    return clamp_camera(cam_x, cam_y, new_size, screen_w, screen_h, map_w, map_h)
+def screen_to_world(screen_x, screen_y, cam_x, cam_y, zoom):
+    return ((cam_x + screen_x) / zoom, (cam_y + screen_y) / zoom)
+
+
+def world_to_screen(world_x, world_y, cam_x, cam_y, zoom):
+    return (world_x * zoom - cam_x, world_y * zoom - cam_y)
 
 
 # ---------------------------------------------------------------------------
@@ -528,8 +519,10 @@ def main():
     terrain_renderer  = None
     grass_spread      = None
     current_seed      = random.randint(0, 999_999)
-    tile_size         = TILE_SIZE_DEFAULT
-    target_tile_size  = TILE_SIZE_DEFAULT
+    current_zoom      = TILE_SIZE_DEFAULT
+    target_zoom       = TILE_SIZE_DEFAULT
+    zoom_anchor_sx    = 640.0
+    zoom_anchor_sy    = 360.0
     cam_x, cam_y      = 0.0, 0.0
     cur_map_w         = ISLAND_W
     cur_map_h         = ISLAND_H
@@ -547,8 +540,6 @@ def main():
     herd_manager      = HerdManager()
     wolf_pack_manager = WolfPackManager()
     _group_overlay    = [None]
-    zoom_anchor_x     = 0
-    zoom_anchor_y     = 0
 
     # Loading screen state
     _gen_thread: threading.Thread | None = None
@@ -640,18 +631,18 @@ def main():
                         is_fullscreen = True
                     screen_w, screen_h = screen.get_size()
                     if grid is not None:
-                        cam_x, cam_y = clamp_camera(cam_x, cam_y, tile_size,
+                        cam_x, cam_y = clamp_camera(cam_x, cam_y, current_zoom,
                                                     screen_w, screen_h,
                                                     cur_map_w, cur_map_h)
 
                 if state == STATE_PLAY:
                     if event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
-                        zoom_anchor_x, zoom_anchor_y = screen_w // 2, screen_h // 2
-                        target_tile_size = min(TILE_SIZE_MAX, target_tile_size * ZOOM_FACTOR)
+                        target_zoom = min(TILE_SIZE_MAX, target_zoom * ZOOM_FACTOR)
+                        zoom_anchor_sx, zoom_anchor_sy = screen_w / 2.0, screen_h / 2.0
 
                     elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
-                        zoom_anchor_x, zoom_anchor_y = screen_w // 2, screen_h // 2
-                        target_tile_size = max(TILE_SIZE_MIN, target_tile_size / ZOOM_FACTOR)
+                        target_zoom = max(TILE_SIZE_MIN, target_zoom / ZOOM_FACTOR)
+                        zoom_anchor_sx, zoom_anchor_sy = screen_w / 2.0, screen_h / 2.0
 
                     elif event.key == pygame.K_ESCAPE:
                         state        = STATE_TITLE
@@ -665,11 +656,11 @@ def main():
                         show_groups  = False
 
             if event.type == pygame.MOUSEWHEEL and state == STATE_PLAY:
-                zoom_anchor_x, zoom_anchor_y = mouse_pos
                 if event.y > 0:
-                    target_tile_size = min(TILE_SIZE_MAX, target_tile_size * ZOOM_FACTOR)
+                    target_zoom = min(TILE_SIZE_MAX, target_zoom * ZOOM_FACTOR)
                 else:
-                    target_tile_size = max(TILE_SIZE_MIN, target_tile_size / ZOOM_FACTOR)
+                    target_zoom = max(TILE_SIZE_MIN, target_zoom / ZOOM_FACTOR)
+                zoom_anchor_sx, zoom_anchor_sy = float(mouse_pos[0]), float(mouse_pos[1])
 
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
 
@@ -777,18 +768,16 @@ def main():
 
                     # Map click — place NPC or paint terrain
                     if not clicked_ui and mouse_pos[1] < screen_h - BOTTOM_BAR_H:
-                        world_x = mouse_pos[0] + cam_x
-                        world_y = mouse_pos[1] + cam_y
-                        ts      = max(1, round(tile_size))
-                        col     = int(world_x // ts)
-                        row     = int(world_y // ts)
+                        tx, ty  = screen_to_world(mouse_pos[0], mouse_pos[1],
+                                                  cam_x, cam_y, current_zoom)
+                        col     = int(tx)
+                        row     = int(ty)
                         rows    = len(grid)
                         cols    = len(grid[0]) if rows else 0
                         in_bounds = 0 <= row < rows and 0 <= col < cols
                         on_land   = in_bounds and grid[row][col] != WATER
 
                         if spawner_mode is not None and on_land:
-                            tx, ty = world_x / ts, world_y / ts
                             if spawner_mode == SPAWN_FEMALE_SHEEP:
                                 sheep_list.append(Sheep(tx, ty))
                             elif spawner_mode == SPAWN_MALE_SHEEP:
@@ -864,10 +853,10 @@ def main():
                 terrain_renderer = TerrainRenderer(grid)
                 grass_spread     = GrassSpread(grid)
                 default_ts       = CONTINENT_TILE_DEFAULT if _gen_type == "continent" else TILE_SIZE_DEFAULT
-                tile_size        = default_ts
-                target_tile_size = default_ts
-                cam_x            = max(0.0, (cur_map_w * tile_size - screen_w) / 2)
-                cam_y            = max(0.0, (cur_map_h * tile_size - screen_h) / 2)
+                current_zoom     = float(default_ts)
+                target_zoom      = float(default_ts)
+                cam_x            = max(0.0, (cur_map_w * current_zoom - screen_w) / 2)
+                cam_y            = max(0.0, (cur_map_h * current_zoom - screen_h) / 2)
                 sheep_list       = []
                 wolf_list        = []
                 spawner_mode     = None
@@ -884,22 +873,25 @@ def main():
                 _gen_event       = None
                 state            = STATE_PLAY
 
-        # --- Smooth zoom ---
-        if state == STATE_PLAY and abs(tile_size - target_tile_size) > 0.05:
-            old_size  = tile_size
-            tile_size += (target_tile_size - tile_size) * min(1.0, ZOOM_LERP * dt)
-            tile_size  = max(TILE_SIZE_MIN, min(TILE_SIZE_MAX, tile_size))
-            cam_x, cam_y = zoom_camera(
-                cam_x, cam_y, old_size, tile_size, screen_w, screen_h,
-                anchor_sx=zoom_anchor_x, anchor_sy=zoom_anchor_y,
-                map_w=cur_map_w, map_h=cur_map_h,
-            )
-        elif state == STATE_PLAY:
-            tile_size = target_tile_size
 
         # --- Camera movement ---
         if state == STATE_PLAY:
-            speed = max(1.0, CAMERA_SPEED * tile_size / TILE_SIZE_DEFAULT)
+            target_zoom = max(TILE_SIZE_MIN, min(TILE_SIZE_MAX, target_zoom))
+            if abs(current_zoom - target_zoom) > 0.001:
+                anchor_tx, anchor_ty = screen_to_world(
+                    zoom_anchor_sx, zoom_anchor_sy, cam_x, cam_y, current_zoom
+                )
+                current_zoom += (target_zoom - current_zoom) * min(1.0, 12.0 * dt)
+                current_zoom = max(TILE_SIZE_MIN, min(TILE_SIZE_MAX, current_zoom))
+                cam_x = anchor_tx * current_zoom - zoom_anchor_sx
+                cam_y = anchor_ty * current_zoom - zoom_anchor_sy
+                cam_x, cam_y = clamp_camera(cam_x, cam_y, current_zoom,
+                                            screen_w, screen_h,
+                                            cur_map_w, cur_map_h)
+            else:
+                current_zoom = target_zoom
+
+            speed = max(1.0, CAMERA_SPEED * current_zoom / TILE_SIZE_DEFAULT)
             keys  = pygame.key.get_pressed()
             if keys[pygame.K_a]:
                 cam_x -= speed
@@ -909,7 +901,7 @@ def main():
                 cam_y -= speed
             if keys[pygame.K_s]:
                 cam_y += speed
-            cam_x, cam_y = clamp_camera(cam_x, cam_y, tile_size,
+            cam_x, cam_y = clamp_camera(cam_x, cam_y, current_zoom,
                                         screen_w, screen_h,
                                         cur_map_w, cur_map_h)
 
@@ -967,14 +959,14 @@ def main():
 
         elif state == STATE_PLAY:
             screen.fill(WATER_COLOR)
-            terrain_renderer.draw(screen, tile_size, cam_x, cam_y, screen_w, screen_h)
+            terrain_renderer.draw(screen, current_zoom, cam_x, cam_y, screen_w, screen_h)
             for sheep in sheep_list:
-                sheep.draw(screen, cam_x, cam_y, tile_size)
+                sheep.draw(screen, cam_x, cam_y, current_zoom)
             for wolf in wolf_list:
-                wolf.draw(screen, cam_x, cam_y, tile_size)
+                wolf.draw(screen, cam_x, cam_y, current_zoom)
 
             if show_groups:
-                draw_group_overlays(screen, _group_overlay, cam_x, cam_y, tile_size,
+                draw_group_overlays(screen, _group_overlay, cam_x, cam_y, current_zoom,
                                     sheep_list, wolf_list)
 
             # Day/night overlay
@@ -1010,7 +1002,7 @@ def main():
                 spawner_mode, terrain_mode,
                 spawner_open, terrain_open,
                 spawner_opt_btns, terrain_opt_btns,
-                current_seed, tile_size, screen_w, screen_h, is_fullscreen,
+                current_seed, current_zoom, screen_w, screen_h, is_fullscreen,
                 speed_btns, sim_speed_idx, day_number,
                 stats_btn=stats_btn, stats_open=stats_open, stats_lines=stats_lines,
                 groups_btn=groups_btn, show_groups=show_groups,
@@ -1028,13 +1020,18 @@ def main():
                 elif terrain_mode is not None:
                     color = TERRAIN_PAINT_COLORS[terrain_mode]
                     mx, my = mouse_pos
-                    ts = max(1, round(tile_size))
                     # Show tile-aligned highlight
-                    col = int((mx + cam_x) // ts)
-                    row = int((my + cam_y) // ts)
-                    hx  = col * ts - int(cam_x)
-                    hy  = row * ts - int(cam_y)
-                    pygame.draw.rect(screen, color, (hx, hy, ts, ts), 2)
+                    tx, ty = screen_to_world(mx, my, cam_x, cam_y, current_zoom)
+                    col = int(tx)
+                    row = int(ty)
+                    hx0, hy0 = world_to_screen(col, row, cam_x, cam_y, current_zoom)
+                    hx1, hy1 = world_to_screen(col + 1, row + 1, cam_x, cam_y, current_zoom)
+                    pygame.draw.rect(
+                        screen,
+                        color,
+                        (round(hx0), round(hy0), max(1, round(hx1 - hx0)), max(1, round(hy1 - hy0))),
+                        2,
+                    )
 
         pygame.display.flip()
 

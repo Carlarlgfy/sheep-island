@@ -1,3 +1,4 @@
+import math
 import pygame
 import random
 from mapgen import WATER, SAND, DIRT, GRASS
@@ -135,20 +136,26 @@ class TerrainRenderer:
     def _draw_cached(self, screen: pygame.Surface,
                      cam_x: float, cam_y: float,
                      screen_w: int, screen_h: int,
-                     rows: int, cols: int, ts: int):
+                     rows: int, cols: int, tile_size: float):
         """Blit a scaled crop of the cached map surface — O(1) draw calls."""
-        start_c = max(0, int(cam_x) // ts)
-        start_r = max(0, int(cam_y) // ts)
-        end_c   = min(cols, start_c + screen_w // ts + 2)
-        end_r   = min(rows, start_r + screen_h // ts + 2)
+        start_c = max(0, int(math.floor(cam_x / tile_size)))
+        start_r = max(0, int(math.floor(cam_y / tile_size)))
+        end_c   = min(cols, int(math.ceil((cam_x + screen_w) / tile_size)) + 1)
+        end_r   = min(rows, int(math.ceil((cam_y + screen_h) / tile_size)) + 1)
         src_w   = end_c - start_c
         src_h   = end_r - start_r
         if src_w <= 0 or src_h <= 0:
             return
         src_rect = pygame.Rect(start_c, start_r, src_w, src_h)
         sub      = self._map_surf.subsurface(src_rect)
-        scaled   = pygame.transform.scale(sub, (src_w * ts, src_h * ts))
-        screen.blit(scaled, (start_c * ts - int(cam_x), start_r * ts - int(cam_y)))
+        dx0      = round(start_c * tile_size - cam_x)
+        dy0      = round(start_r * tile_size - cam_y)
+        dx1      = round(end_c * tile_size - cam_x)
+        dy1      = round(end_r * tile_size - cam_y)
+        dest_w   = max(1, dx1 - dx0)
+        dest_h   = max(1, dy1 - dy0)
+        scaled   = pygame.transform.scale(sub, (dest_w, dest_h))
+        screen.blit(scaled, (dx0, dy0))
 
     # ------------------------------------------------------------------
     # Tick
@@ -179,36 +186,45 @@ class TerrainRenderer:
         grid = self.grid
         rows = len(grid)
         cols = len(grid[0]) if rows else 0
-        ts   = max(1, round(tile_size))
-        cx   = int(cam_x)
-        cy   = int(cam_y)
 
         # --- Fast path: cached surface for small tile sizes ---
-        if ts < self._LOW_ZOOM_THRESHOLD:
+        if tile_size < self._LOW_ZOOM_THRESHOLD:
             if self._map_surf is None:
                 self._build_map_surf()
-            self._draw_cached(screen, cam_x, cam_y, screen_w, screen_h, rows, cols, ts)
+            self._draw_cached(screen, cam_x, cam_y, screen_w, screen_h, rows, cols, tile_size)
             return
 
         # --- Chunk-based rendering: pre-render 16×16 tile blocks, blit each chunk ---
+        ts = max(1, round(tile_size))
         # Clear the whole chunk cache whenever the tile_size rounds to a new pixel value
         if ts != self._last_ts:
             self._chunk_cache.clear()
             self._last_ts = ts
 
-        chunk_px   = CHUNK_SIZE * ts
-        start_cc   = max(0, cx // chunk_px)
-        start_cr   = max(0, cy // chunk_px)
-        end_cc     = min((cols - 1) // CHUNK_SIZE + 1, start_cc + screen_w // chunk_px + 2)
-        end_cr     = min((rows - 1) // CHUNK_SIZE + 1, start_cr + screen_h // chunk_px + 2)
+        chunk_world_px = CHUNK_SIZE * tile_size
+        start_cc = max(0, int(math.floor(cam_x / chunk_world_px)))
+        start_cr = max(0, int(math.floor(cam_y / chunk_world_px)))
+        end_cc   = min((cols - 1) // CHUNK_SIZE + 1,
+                       int(math.ceil((cam_x + screen_w) / chunk_world_px)) + 1)
+        end_cr   = min((rows - 1) // CHUNK_SIZE + 1,
+                       int(math.ceil((cam_y + screen_h) / chunk_world_px)) + 1)
 
         for cr in range(start_cr, end_cr):
             for cc in range(start_cc, end_cc):
                 key = (cr, cc)
                 if key not in self._chunk_cache:
                     self._chunk_cache[key] = self._render_chunk(cr, cc, ts, rows, cols)
-                screen.blit(self._chunk_cache[key],
-                            (cc * chunk_px - cx, cr * chunk_px - cy))
+                dx0 = round(cc * chunk_world_px - cam_x)
+                dy0 = round(cr * chunk_world_px - cam_y)
+                dx1 = round((cc + 1) * chunk_world_px - cam_x)
+                dy1 = round((cr + 1) * chunk_world_px - cam_y)
+                dest_w = max(1, dx1 - dx0)
+                dest_h = max(1, dy1 - dy0)
+                chunk = self._chunk_cache[key]
+                if chunk.get_size() == (dest_w, dest_h):
+                    screen.blit(chunk, (dx0, dy0))
+                else:
+                    screen.blit(pygame.transform.scale(chunk, (dest_w, dest_h)), (dx0, dy0))
 
         # Evict off-screen chunks to keep memory bounded (keep visible + 1-chunk border)
         if len(self._chunk_cache) > 120:
