@@ -17,11 +17,11 @@ from wolf_pack import WolfPackManager
 # ---------------------------------------------------------------------------
 
 ISLAND_W, ISLAND_H         = 1024, 1024
-CONTINENT_W, CONTINENT_H   = 2048, 2048
+CONTINENT_W, CONTINENT_H   = 4096, 4096
 
 TILE_SIZE_DEFAULT           = 14.0
-CONTINENT_TILE_DEFAULT      = 8.0
-TILE_SIZE_MIN               = 2.0
+CONTINENT_TILE_DEFAULT      = 4.0
+TILE_SIZE_MIN               = 0.5
 TILE_SIZE_MAX               = 48.0
 ZOOM_FACTOR                 = 1.1
 CAMERA_SPEED                = 55
@@ -391,6 +391,18 @@ def world_to_screen(world_x, world_y, cam_x, cam_y, zoom):
     return (world_x * zoom - cam_x, world_y * zoom - cam_y)
 
 
+def _paint_brush(grid, row, col, terrain_type, brush, rows, cols, notify):
+    """Paint a square brush of radius `brush` tiles centered on (row, col)."""
+    r = brush - 1
+    for dr in range(-r, r + 1):
+        for dc in range(-r, r + 1):
+            nr, nc = row + dr, col + dc
+            if 0 <= nr < rows and 0 <= nc < cols:
+                if grid[nr][nc] != terrain_type:
+                    grid[nr][nc] = terrain_type
+                    notify(nr, nc)
+
+
 # ---------------------------------------------------------------------------
 # Button layout  (recalculated every frame so resize is seamless)
 # ---------------------------------------------------------------------------
@@ -530,6 +542,8 @@ def main():
     wolf_list:  list[Wolf]  = []
     spawner_mode      = None   # None | SPAWN_* constant
     terrain_mode      = None   # None | WATER/SAND/DIRT/GRASS
+    terrain_brush     = 1      # brush radius in tiles (1 = single tile)
+    is_painting       = False  # True while LMB held in terrain mode
     spawner_open      = False
     terrain_open      = False
     stats_open        = False
@@ -644,12 +658,19 @@ def main():
                         target_zoom = max(TILE_SIZE_MIN, target_zoom / ZOOM_FACTOR)
                         zoom_anchor_sx, zoom_anchor_sy = screen_w / 2.0, screen_h / 2.0
 
+                    elif event.key == pygame.K_RIGHTBRACKET and terrain_mode is not None:
+                        terrain_brush = min(8, terrain_brush + 1)
+
+                    elif event.key == pygame.K_LEFTBRACKET and terrain_mode is not None:
+                        terrain_brush = max(1, terrain_brush - 1)
+
                     elif event.key == pygame.K_ESCAPE:
                         state        = STATE_TITLE
                         sheep_list   = []
                         wolf_list    = []
                         spawner_mode = None
                         terrain_mode = None
+                        is_painting  = False
                         spawner_open = False
                         terrain_open = False
                         stats_open   = False
@@ -700,6 +721,7 @@ def main():
                         wolf_list    = []
                         spawner_mode = None
                         terrain_mode = None
+                        is_painting  = False
                         spawner_open = False
                         terrain_open = False
                         stats_open   = False
@@ -788,9 +810,27 @@ def main():
                                 wolf_list.append(Wolf(tx, ty, sex="male"))
 
                         elif terrain_mode is not None and in_bounds:
-                            if grid[row][col] != terrain_mode:
-                                grid[row][col] = terrain_mode
-                                mark_terrain_changed(row, col)
+                            _paint_brush(grid, row, col, terrain_mode,
+                                         terrain_brush, rows, cols,
+                                         mark_terrain_changed)
+                            is_painting = True
+
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                is_painting = False
+
+            if event.type == pygame.MOUSEMOTION and is_painting and state == STATE_PLAY:
+                if terrain_mode is not None and mouse_pos[1] < screen_h - BOTTOM_BAR_H:
+                    tx, ty  = screen_to_world(mouse_pos[0], mouse_pos[1],
+                                              cam_x, cam_y, current_zoom)
+                    col     = int(tx)
+                    row     = int(ty)
+                    rows    = len(grid)
+                    cols    = len(grid[0]) if rows else 0
+                    in_bounds = 0 <= row < rows and 0 <= col < cols
+                    if in_bounds:
+                        _paint_brush(grid, row, col, terrain_mode,
+                                     terrain_brush, rows, cols,
+                                     mark_terrain_changed)
 
         # --- Loading state ---
         if state == STATE_LOADING:
@@ -1020,18 +1060,21 @@ def main():
                 elif terrain_mode is not None:
                     color = TERRAIN_PAINT_COLORS[terrain_mode]
                     mx, my = mouse_pos
-                    # Show tile-aligned highlight
                     tx, ty = screen_to_world(mx, my, cam_x, cam_y, current_zoom)
                     col = int(tx)
                     row = int(ty)
-                    hx0, hy0 = world_to_screen(col, row, cam_x, cam_y, current_zoom)
-                    hx1, hy1 = world_to_screen(col + 1, row + 1, cam_x, cam_y, current_zoom)
+                    r = terrain_brush - 1
+                    hx0, hy0 = world_to_screen(col - r, row - r, cam_x, cam_y, current_zoom)
+                    hx1, hy1 = world_to_screen(col + r + 1, row + r + 1, cam_x, cam_y, current_zoom)
                     pygame.draw.rect(
                         screen,
                         color,
                         (round(hx0), round(hy0), max(1, round(hx1 - hx0)), max(1, round(hy1 - hy0))),
                         2,
                     )
+                    if terrain_brush > 1:
+                        brush_label = font_ui.render(f"{terrain_brush * 2 - 1}x{terrain_brush * 2 - 1}", True, color)
+                        screen.blit(brush_label, (mx + 8, my - 16))
 
         pygame.display.flip()
 

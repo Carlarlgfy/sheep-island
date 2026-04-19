@@ -359,8 +359,8 @@ class ContinentGenerator(MapGenerator):
       • 6-octave FBM noise for more organic coastlines
     """
 
-    CONTINENT_W = 2048
-    CONTINENT_H = 2048
+    CONTINENT_W = 4096
+    CONTINENT_H = 4096
 
     def __init__(self, seed: int = None):
         super().__init__(width=self.CONTINENT_W, height=self.CONTINENT_H, seed=seed)
@@ -392,17 +392,18 @@ class ContinentGenerator(MapGenerator):
             self._arms.append((angle, length, width))
 
         # Offshore island blobs
-        n_islands = rng.randint(2, 5)
+        n_islands = rng.randint(10, 18)
         self._offshore = []
         for _ in range(n_islands):
             angle = rng.uniform(0, 2 * math.pi)
-            dist  = rng.uniform(1.18, 1.90) * max_r
+            dist  = rng.uniform(1.15, 2.20) * max_r
             ix = self._cont_cx + math.cos(angle) * dist
             iy = self._cont_cy + math.sin(angle) * dist
             # Clamp so islands don't fall off the grid edge
-            ix = max(80, min(self.width  - 80, ix))
-            iy = max(80, min(self.height - 80, iy))
-            ir = rng.uniform(0.04, 0.13) * max_r
+            margin = 120
+            ix = max(margin, min(self.width  - margin, ix))
+            iy = max(margin, min(self.height - margin, iy))
+            ir = rng.uniform(0.03, 0.10) * max_r
             self._offshore.append((ix, iy, ir))
 
         # ----------------------------------------------------------------
