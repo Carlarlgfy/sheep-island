@@ -3,7 +3,7 @@ import math
 import random
 import os
 
-from mapgen import WATER, GRASS, DIRT
+from mapgen import WATER, GRASS, DIRT, is_walkable_tile, advance_until_blocked
 
 _SHEEP_DIR = os.path.join(os.path.dirname(__file__), "white sheep")
 
@@ -897,7 +897,7 @@ class Sheep:
                 ox = self.tx + random.uniform(-2.0, 2.0)
                 oy = self.ty + random.uniform(-2.0, 2.0)
                 c, r = int(ox), int(oy)
-                if 0 <= r < rows and 0 <= c < cols and grid[r][c] != WATER:
+                if is_walkable_tile(grid, r, c):
                     kwargs = dict(age=0.0,
                                   genetic_size=baby_size,
                                   genetic_maturity=baby_maturity,
@@ -1227,12 +1227,12 @@ class Sheep:
             new_tx = self.tx + self.dx * self.move_speed * speed_mult * fear_mult * dt + sx
             new_ty = self.ty + self.dy * self.move_speed * speed_mult * fear_mult * dt + sy
 
-            ncol = int(new_tx)
-            nrow = int(new_ty)
-            if 0 <= nrow < rows and 0 <= ncol < cols and grid[nrow][ncol] != WATER:
-                self.tx = new_tx
-                self.ty = new_ty
-            else:
+            move_tx, move_ty, blocked = advance_until_blocked(
+                grid, self.tx, self.ty, new_tx, new_ty
+            )
+            self.tx = move_tx
+            self.ty = move_ty
+            if blocked:
                 self.state = Sheep.IDLE
                 self.dx    = 0.0
                 self.dy    = 0.0

@@ -4,7 +4,10 @@ import random
 import math
 import threading
 
-from mapgen import MapGenerator, ContinentGenerator, flood_fill_grass, WATER, SAND, DIRT, GRASS
+from mapgen import (
+    MapGenerator, ContinentGenerator, flood_fill_grass,
+    WATER, SAND, DIRT, GRASS, WALL, is_walkable_tile, is_walkable_terrain,
+)
 from sheep import Sheep
 from ram import Ram
 from grass import TerrainRenderer, GrassSpread, WATER_COLOR
@@ -62,6 +65,7 @@ TERRAIN_PAINT_COLORS = {
     SAND:  (170, 150,  80),
     DIRT:  (100,  70,  30),
     GRASS: ( 40, 100,  25),
+    WALL:  (150,  78,  60),
 }
 
 
@@ -410,6 +414,25 @@ def _paint_brush(grid, row, col, terrain_type, brush, rows, cols, notify):
                 notify(nr, nc)
 
 
+def _line_tiles(start_row, start_col, end_row, end_col):
+    """Return a 1-tile-thick cardinal line snapped to the dominant drag axis."""
+    dr = end_row - start_row
+    dc = end_col - start_col
+    if abs(dc) >= abs(dr):
+        step = 1 if dc >= 0 else -1
+        return [(start_row, c) for c in range(start_col, end_col + step, step)]
+    step = 1 if dr >= 0 else -1
+    return [(r, start_col) for r in range(start_row, end_row + step, step)]
+
+
+def _paint_line(grid, start_row, start_col, end_row, end_col, terrain_type, notify):
+    """Paint a snapped 1-tile-thick cardinal line."""
+    for row, col in _line_tiles(start_row, start_col, end_row, end_col):
+        if 0 <= row < len(grid) and 0 <= col < len(grid[0]) and grid[row][col] != terrain_type:
+            grid[row][col] = terrain_type
+            notify(row, col)
+
+
 # ---------------------------------------------------------------------------
 # Button layout  (recalculated every frame so resize is seamless)
 # ---------------------------------------------------------------------------
@@ -474,10 +497,10 @@ def _make_spawner_opt_btns():
 
 def _make_terrain_opt_btns():
     """Create the four terrain paint option button dicts."""
-    labels = {WATER: "Water", SAND: "Sand", DIRT: "Dirt", GRASS: "Grass"}
+    labels = {WATER: "Water", SAND: "Sand", DIRT: "Dirt", GRASS: "Grass", WALL: "Brick"}
     btn_w = 80
     btns = []
-    for key in (WATER, SAND, DIRT, GRASS):
+    for key in (WATER, SAND, DIRT, GRASS, WALL):
         col = TERRAIN_PAINT_COLORS[key]
         btns.append({
             "label":      labels[key],
@@ -551,6 +574,8 @@ def main():
     terrain_mode      = None   # None | WATER/SAND/DIRT/GRASS
     terrain_brush     = 1      # square brush side length in tiles
     is_painting       = False  # True while LMB held in terrain mode
+    wall_drag_start   = None
+    wall_drag_current = None
     spawner_open      = False
     terrain_open      = False
     stats_open        = False
@@ -666,7 +691,7 @@ def main():
                         zoom_anchor_sx, zoom_anchor_sy = screen_w / 2.0, screen_h / 2.0
 
                     elif event.key == pygame.K_RIGHTBRACKET and terrain_mode is not None:
-                        terrain_brush = min(7, terrain_brush + 1)
+                        terrain_brush = min(10, terrain_brush + 1)
 
                     elif event.key == pygame.K_LEFTBRACKET and terrain_mode is not None:
                         terrain_brush = max(1, terrain_brush - 1)
@@ -678,6 +703,8 @@ def main():
                         spawner_mode = None
                         terrain_mode = None
                         is_painting  = False
+                        wall_drag_start = None
+                        wall_drag_current = None
                         spawner_open = False
                         terrain_open = False
                         stats_open   = False
@@ -729,6 +756,8 @@ def main():
                         spawner_mode = None
                         terrain_mode = None
                         is_painting  = False
+                        wall_drag_start = None
+                        wall_drag_current = None
                         spawner_open = False
                         terrain_open = False
                         stats_open   = False
@@ -804,7 +833,7 @@ def main():
                         rows    = len(grid)
                         cols    = len(grid[0]) if rows else 0
                         in_bounds = 0 <= row < rows and 0 <= col < cols
-                        on_land   = in_bounds and grid[row][col] != WATER
+                        on_land   = in_bounds and is_walkable_terrain(grid[row][col])
 
                         if spawner_mode is not None and on_land:
                             if spawner_mode == SPAWN_FEMALE_SHEEP:
@@ -817,12 +846,25 @@ def main():
                                 wolf_list.append(Wolf(tx, ty, sex="male"))
 
                         elif terrain_mode is not None and in_bounds:
-                            _paint_brush(grid, row, col, terrain_mode,
-                                         terrain_brush, rows, cols,
-                                         mark_terrain_changed)
-                            is_painting = True
+                            if terrain_mode == WALL:
+                                if grid[row][col] != WATER:
+                                    wall_drag_start = (row, col)
+                                    wall_drag_current = (row, col)
+                            else:
+                                _paint_brush(grid, row, col, terrain_mode,
+                                             terrain_brush, rows, cols,
+                                             mark_terrain_changed)
+                                is_painting = True
 
             if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                if (state == STATE_PLAY and terrain_mode == WALL
+                        and wall_drag_start is not None and wall_drag_current is not None):
+                    _paint_line(grid,
+                                wall_drag_start[0], wall_drag_start[1],
+                                wall_drag_current[0], wall_drag_current[1],
+                                WALL, mark_terrain_changed)
+                    wall_drag_start = None
+                    wall_drag_current = None
                 is_painting = False
 
             if event.type == pygame.MOUSEMOTION and is_painting and state == STATE_PLAY:
@@ -838,6 +880,16 @@ def main():
                         _paint_brush(grid, row, col, terrain_mode,
                                      terrain_brush, rows, cols,
                                      mark_terrain_changed)
+            elif (event.type == pygame.MOUSEMOTION and state == STATE_PLAY
+                  and terrain_mode == WALL and wall_drag_start is not None):
+                if mouse_pos[1] < screen_h - BOTTOM_BAR_H:
+                    tx, ty = screen_to_world(mouse_pos[0], mouse_pos[1], cam_x, cam_y, current_zoom)
+                    col = int(tx)
+                    row = int(ty)
+                    rows = len(grid)
+                    cols = len(grid[0]) if rows else 0
+                    if 0 <= row < rows and 0 <= col < cols and grid[row][col] != WATER:
+                        wall_drag_current = (row, col)
 
         # --- Loading state ---
         if state == STATE_LOADING:
@@ -908,6 +960,8 @@ def main():
                 wolf_list        = []
                 spawner_mode     = None
                 terrain_mode     = None
+                wall_drag_start  = None
+                wall_drag_current = None
                 spawner_open     = False
                 terrain_open     = False
                 stats_open       = False
@@ -1070,18 +1124,32 @@ def main():
                     tx, ty = screen_to_world(mx, my, cam_x, cam_y, current_zoom)
                     col = int(tx)
                     row = int(ty)
-                    row0, row1, col0, col1 = _brush_bounds(row, col, terrain_brush)
-                    hx0, hy0 = world_to_screen(col0, row0, cam_x, cam_y, current_zoom)
-                    hx1, hy1 = world_to_screen(col1 + 1, row1 + 1, cam_x, cam_y, current_zoom)
-                    pygame.draw.rect(
-                        screen,
-                        color,
-                        (round(hx0), round(hy0), max(1, round(hx1 - hx0)), max(1, round(hy1 - hy0))),
-                        2,
-                    )
-                    if terrain_brush > 1:
-                        brush_label = font_ui.render(f"{terrain_brush}x{terrain_brush}", True, color)
-                        screen.blit(brush_label, (mx + 8, my - 16))
+                    if terrain_mode == WALL:
+                        preview_start = wall_drag_start if wall_drag_start is not None else (row, col)
+                        preview_end = wall_drag_current if wall_drag_current is not None else (row, col)
+                        for prow, pcol in _line_tiles(preview_start[0], preview_start[1],
+                                                      preview_end[0], preview_end[1]):
+                            hx0, hy0 = world_to_screen(pcol, prow, cam_x, cam_y, current_zoom)
+                            hx1, hy1 = world_to_screen(pcol + 1, prow + 1, cam_x, cam_y, current_zoom)
+                            rect = (round(hx0), round(hy0),
+                                    max(1, round(hx1 - hx0)), max(1, round(hy1 - hy0)))
+                            pygame.draw.rect(screen, color, rect, 2)
+                            fill = pygame.Surface((rect[2], rect[3]), pygame.SRCALPHA)
+                            fill.fill((*color, 55))
+                            screen.blit(fill, (rect[0], rect[1]))
+                    else:
+                        row0, row1, col0, col1 = _brush_bounds(row, col, terrain_brush)
+                        hx0, hy0 = world_to_screen(col0, row0, cam_x, cam_y, current_zoom)
+                        hx1, hy1 = world_to_screen(col1 + 1, row1 + 1, cam_x, cam_y, current_zoom)
+                        pygame.draw.rect(
+                            screen,
+                            color,
+                            (round(hx0), round(hy0), max(1, round(hx1 - hx0)), max(1, round(hy1 - hy0))),
+                            2,
+                        )
+                        if terrain_brush > 1:
+                            brush_label = font_ui.render(f"{terrain_brush}x{terrain_brush}", True, color)
+                            screen.blit(brush_label, (mx + 8, my - 16))
 
         pygame.display.flip()
 

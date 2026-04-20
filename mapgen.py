@@ -6,8 +6,52 @@ WATER = "water"
 SAND  = "sand"
 DIRT  = "dirt"
 GRASS = "grass"
+WALL  = "wall"
 
-TERRAIN_ORDER = [WATER, SAND, DIRT, GRASS]
+TERRAIN_ORDER = [WATER, SAND, DIRT, GRASS, WALL]
+
+
+def is_walkable_terrain(terrain: str) -> bool:
+    """Return True when creatures can move through the terrain tile."""
+    return terrain not in (WATER, WALL)
+
+
+def is_walkable_tile(grid: list[list[str]], row: int, col: int) -> bool:
+    """Bounds-safe tile passability helper used by movement code."""
+    rows = len(grid)
+    cols = len(grid[0]) if rows else 0
+    return 0 <= row < rows and 0 <= col < cols and is_walkable_terrain(grid[row][col])
+
+
+def advance_until_blocked(grid: list[list[str]],
+                          start_x: float, start_y: float,
+                          end_x: float, end_y: float,
+                          step_size: float = 0.35) -> tuple[float, float, bool]:
+    """Trace movement across the segment and stop before water/walls.
+
+    Returns `(x, y, blocked)` where `x, y` is the furthest reachable point
+    along the segment. This prevents fast movers from skipping over thin walls.
+    """
+    dx = end_x - start_x
+    dy = end_y - start_y
+    distance = math.hypot(dx, dy)
+    if distance <= 1e-9:
+        blocked = not is_walkable_tile(grid, int(start_y), int(start_x))
+        return start_x, start_y, blocked
+
+    steps = max(1, int(math.ceil(distance / max(0.05, step_size))))
+    last_x = start_x
+    last_y = start_y
+    for i in range(1, steps + 1):
+        t = i / steps
+        x = start_x + dx * t
+        y = start_y + dy * t
+        if is_walkable_tile(grid, int(y), int(x)):
+            last_x = x
+            last_y = y
+        else:
+            return last_x, last_y, True
+    return end_x, end_y, False
 
 
 class MapGenerator:

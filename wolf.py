@@ -18,7 +18,7 @@ import random
 
 import pygame
 
-from mapgen import WATER, GRASS
+from mapgen import WATER, GRASS, is_walkable_tile, advance_until_blocked
 
 _WOLF_DIR = os.path.join(os.path.dirname(__file__), "brown gray female wolf")
 
@@ -1214,7 +1214,7 @@ class Wolf:
                 ox = self.tx + random.uniform(-2.0, 2.0)
                 oy = self.ty + random.uniform(-2.0, 2.0)
                 c, r = int(ox), int(oy)
-                if 0 <= r < rows and 0 <= c < cols and grid[r][c] != WATER:
+                if is_walkable_tile(grid, r, c):
                     pup = Wolf(ox, oy,
                                age=0.0,
                                sex=data["sex"],
@@ -1280,12 +1280,7 @@ class Wolf:
         new_tx = self.tx + self.dx * spd * dt + sx + px
         new_ty = self.ty + self.dy * spd * dt + sy + py
 
-        rows = len(grid)
-        cols = len(grid[0]) if rows else 0
-        nc, nr = int(new_tx), int(new_ty)
-        if 0 <= nr < rows and 0 <= nc < cols and grid[nr][nc] != WATER:
-            self.tx = new_tx
-            self.ty = new_ty
+        self.tx, self.ty, _ = advance_until_blocked(grid, self.tx, self.ty, new_tx, new_ty)
 
     # ------------------------------------------------------------------
     # Main update
@@ -1389,10 +1384,7 @@ class Wolf:
             sx, sy = self._separation_delta(wolf_list, dt)
             new_tx = self.tx + self.dx * self.move_speed * 1.4 * dt + sx
             new_ty = self.ty + self.dy * self.move_speed * 1.4 * dt + sy
-            rows = len(grid); cols = len(grid[0]) if rows else 0
-            nc, nr = int(new_tx), int(new_ty)
-            if 0 <= nr < rows and 0 <= nc < cols and grid[nr][nc] != WATER:
-                self.tx = new_tx; self.ty = new_ty
+            self.tx, self.ty, _ = advance_until_blocked(grid, self.tx, self.ty, new_tx, new_ty)
             # Stop fleeing when timer up AND HP partly recovered
             if self._flee_timer <= 0 and self.hp >= self.max_hp * 0.45:
                 self.state = Wolf.IDLE
@@ -1474,11 +1466,11 @@ class Wolf:
                     fx, fy = self._pack_alpha_follow_delta(dt)
                     new_tx = self.tx + self.dx * self.move_speed * 0.32 * dt + sx + px + fx
                     new_ty = self.ty + self.dy * self.move_speed * 0.32 * dt + sy + py + fy
-                    rows = len(grid); cols = len(grid[0]) if rows else 0
-                    nc, nr = int(new_tx), int(new_ty)
-                    if 0 <= nr < rows and 0 <= nc < cols and grid[nr][nc] != WATER:
-                        self.tx = new_tx; self.ty = new_ty
-                    else:
+                    old_tx, old_ty = self.tx, self.ty
+                    self.tx, self.ty, blocked = advance_until_blocked(
+                        grid, self.tx, self.ty, new_tx, new_ty
+                    )
+                    if blocked and abs(self.tx - old_tx) < 1e-6 and abs(self.ty - old_ty) < 1e-6:
                         angle   = random.uniform(0, 2 * math.pi)
                         self.dx = math.cos(angle)
                         self.dy = math.sin(angle)
@@ -1635,12 +1627,7 @@ class Wolf:
             sx, sy = self._separation_delta(wolf_list, dt)
             back_x = self.tx - self._lunge_dir_x * WOLF_LUNGE_RECOVER_SPEED * dt + sx
             back_y = self.ty - self._lunge_dir_y * WOLF_LUNGE_RECOVER_SPEED * dt + sy
-            rows = len(grid)
-            cols = len(grid[0]) if rows else 0
-            nc, nr = int(back_x), int(back_y)
-            if 0 <= nr < rows and 0 <= nc < cols and grid[nr][nc] != WATER:
-                self.tx = back_x
-                self.ty = back_y
+            self.tx, self.ty, _ = advance_until_blocked(grid, self.tx, self.ty, back_x, back_y)
 
             if self._lunge_timer <= 0:
                 self._lunge_active = False
@@ -1920,11 +1907,11 @@ class Wolf:
             drift_speed = self.move_speed * (0.55 if self.pack_size > 1 and not self.pack_is_alpha else 0.82 if self.pack_size > 1 else 1.0)
             new_tx = self.tx + self.dx * drift_speed * dt + sx + ax + px + fx
             new_ty = self.ty + self.dy * drift_speed * dt + sy + ay + py + fy
-            rows = len(grid); cols = len(grid[0]) if rows else 0
-            nc, nr = int(new_tx), int(new_ty)
-            if 0 <= nr < rows and 0 <= nc < cols and grid[nr][nc] != WATER:
-                self.tx = new_tx; self.ty = new_ty
-            else:
+            old_tx, old_ty = self.tx, self.ty
+            self.tx, self.ty, blocked = advance_until_blocked(
+                grid, self.tx, self.ty, new_tx, new_ty
+            )
+            if blocked and abs(self.tx - old_tx) < 1e-6 and abs(self.ty - old_ty) < 1e-6:
                 # Hit boundary — pick new direction
                 angle   = random.uniform(0, 2 * math.pi)
                 self.dx = math.cos(angle)

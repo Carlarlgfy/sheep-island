@@ -14,7 +14,7 @@ import random
 import os
 import pygame
 
-from mapgen import WATER
+from mapgen import is_walkable_tile, advance_until_blocked
 from sheep import (Sheep, HUNGER_RATE, HP_DRAIN_RATE, HP_MIN, DAY_DURATION,
                    GENETIC_STRENGTH_RANGE, REPRODUCE_COOLDOWN, MATE_SEARCH_RADIUS)
 import sheep as _sheep_module
@@ -507,10 +507,7 @@ class Ram(Sheep):
         sx, sy = self._separation_delta(flock, dt)
         new_tx = self.tx + self.dx * self.speed * 1.3 * dt + sx
         new_ty = self.ty + self.dy * self.speed * 1.3 * dt + sy
-        nc, nr = int(new_tx), int(new_ty)
-        if 0 <= nr < rows and 0 <= nc < cols and grid[nr][nc] != WATER:
-            self.tx = new_tx
-            self.ty = new_ty
+        self.tx, self.ty, _ = advance_until_blocked(grid, self.tx, self.ty, new_tx, new_ty)
         return True
 
     # ------------------------------------------------------------------
@@ -606,10 +603,9 @@ class Ram(Sheep):
                     sx, sy = self._separation_delta(flock, dt)
                     new_tx = self.tx + self.dx * self.speed * dt + sx
                     new_ty = self.ty + self.dy * self.speed * dt + sy
-                    nc, nr = int(new_tx), int(new_ty)
-                    if 0 <= nr < rows and 0 <= nc < cols and grid[nr][nc] != WATER:
-                        self.tx = new_tx
-                        self.ty = new_ty
+                    self.tx, self.ty, _ = advance_until_blocked(
+                        grid, self.tx, self.ty, new_tx, new_ty
+                    )
             else:
                 # Normal exile behavior — can graze, wander, seek herds
                 super().update(dt, grid, regrowth_timers, flock, new_sheep, dirty_callback)

@@ -1,7 +1,7 @@
 import math
 import pygame
 import random
-from mapgen import WATER, SAND, DIRT, GRASS
+from mapgen import WATER, SAND, DIRT, GRASS, WALL
 
 # ---------------------------------------------------------------------------
 # Base colours — slightly richer / darker than the old flat values
@@ -12,6 +12,7 @@ BASE_COLORS = {
     SAND:  (198, 176, 112),
     DIRT:  (115,  82,  44),
     GRASS: ( 48, 108,  32),
+    WALL:  (138,  74,  58),
 }
 
 # Exported so main.py can use it for the background fill
@@ -19,10 +20,10 @@ WATER_COLOR = BASE_COLORS[WATER]
 
 # Elevation priority: higher number = visually "raised" above lower numbers.
 # Shadow strips are drawn on the high-terrain side of any high→low border.
-_PRIORITY = {WATER: 0, SAND: 1, DIRT: 2, GRASS: 3}
+_PRIORITY = {WATER: 0, SAND: 1, DIRT: 2, GRASS: 3, WALL: 4}
 
 # Per-terrain brightness variation range (fraction of base channel value)
-_SHADE_VAR = {WATER: 0.08, SAND: 0.13, DIRT: 0.11, GRASS: 0.14}
+_SHADE_VAR = {WATER: 0.08, SAND: 0.13, DIRT: 0.11, GRASS: 0.14, WALL: 0.08}
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +290,7 @@ class TerrainRenderer:
         elif terrain == DIRT:  self._tex_dirt (screen, col, row, sx, sy, ts)
         elif terrain == SAND:  self._tex_sand (screen, col, row, sx, sy, ts)
         elif terrain == WATER: self._tex_water(screen, col, row, sx, sy, ts)
+        elif terrain == WALL:  self._tex_wall (screen, col, row, sx, sy, ts)
 
     def _tex_grass(self, screen, col, row, sx, sy, ts):
         """2–3 dark blade marks + 1 bright highlight per tile."""
@@ -346,6 +348,24 @@ class TerrainRenderer:
         w = max(2, ts * 2 // 3)
         px = sx + (ts - w) // 2
         pygame.draw.rect(screen, (68, 138, 210), (px, ripple_y, w, 1))
+
+    def _tex_wall(self, screen, col, row, sx, sy, ts):
+        """Simple brick pattern so walls read clearly at play zooms."""
+        mortar = (196, 160, 148)
+        brick  = (112, 58, 44)
+        mid_y  = sy + ts // 2
+        pygame.draw.line(screen, mortar, (sx, sy), (sx + ts - 1, sy), 1)
+        pygame.draw.line(screen, mortar, (sx, mid_y), (sx + ts - 1, mid_y), 1)
+        pygame.draw.line(screen, mortar, (sx, sy), (sx, sy + ts - 1), 1)
+        pygame.draw.line(screen, mortar, (sx + ts - 1, sy), (sx + ts - 1, sy + ts - 1), 1)
+        if ts >= 10:
+            offset = ts // 3
+            pygame.draw.line(screen, mortar, (sx + ts // 2, sy), (sx + ts // 2, mid_y), 1)
+            pygame.draw.line(screen, mortar, (sx + offset, mid_y), (sx + offset, sy + ts - 1), 1)
+            pygame.draw.line(screen, mortar, (sx + min(ts - 2, offset * 2), mid_y),
+                             (sx + min(ts - 2, offset * 2), sy + ts - 1), 1)
+        if ts >= 6:
+            pygame.draw.rect(screen, brick, (sx + 1, sy + 1, max(1, ts - 2), max(1, ts - 2)), 1)
 
     # ------------------------------------------------------------------
     # Edge blending / border shadows
