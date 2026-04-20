@@ -299,7 +299,7 @@ def draw_play_ui(screen, font_ui, back_btn,
     map_label = f"{cur_map_w}x{cur_map_h}"
     hint = font_ui.render(
         f"Day {day_number}   Seed: {seed}   Map: {map_label}   "
-        f"Zoom: {round(tile_size)}px   WASD: move   Scroll/+/-: zoom   {fs_hint}",
+        f"Zoom: {round(tile_size)}px   WASD: move   Scroll/+/-: zoom   [: smaller   ]: larger   {fs_hint}",
         True, (160, 160, 160),
     )
     hint_start_x = 16
@@ -391,16 +391,23 @@ def world_to_screen(world_x, world_y, cam_x, cam_y, zoom):
     return (world_x * zoom - cam_x, world_y * zoom - cam_y)
 
 
+def _brush_bounds(row, col, brush_size):
+    """Return the inclusive tile bounds for a square brush at (row, col)."""
+    start_row = row - (brush_size - 1) // 2
+    start_col = col - (brush_size - 1) // 2
+    end_row = start_row + brush_size - 1
+    end_col = start_col + brush_size - 1
+    return start_row, end_row, start_col, end_col
+
+
 def _paint_brush(grid, row, col, terrain_type, brush, rows, cols, notify):
-    """Paint a square brush of radius `brush` tiles centered on (row, col)."""
-    r = brush - 1
-    for dr in range(-r, r + 1):
-        for dc in range(-r, r + 1):
-            nr, nc = row + dr, col + dc
-            if 0 <= nr < rows and 0 <= nc < cols:
-                if grid[nr][nc] != terrain_type:
-                    grid[nr][nc] = terrain_type
-                    notify(nr, nc)
+    """Paint a square brush of `brush` x `brush` tiles anchored around (row, col)."""
+    row0, row1, col0, col1 = _brush_bounds(row, col, brush)
+    for nr in range(row0, row1 + 1):
+        for nc in range(col0, col1 + 1):
+            if 0 <= nr < rows and 0 <= nc < cols and grid[nr][nc] != terrain_type:
+                grid[nr][nc] = terrain_type
+                notify(nr, nc)
 
 
 # ---------------------------------------------------------------------------
@@ -542,7 +549,7 @@ def main():
     wolf_list:  list[Wolf]  = []
     spawner_mode      = None   # None | SPAWN_* constant
     terrain_mode      = None   # None | WATER/SAND/DIRT/GRASS
-    terrain_brush     = 1      # brush radius in tiles (1 = single tile)
+    terrain_brush     = 1      # square brush side length in tiles
     is_painting       = False  # True while LMB held in terrain mode
     spawner_open      = False
     terrain_open      = False
@@ -659,7 +666,7 @@ def main():
                         zoom_anchor_sx, zoom_anchor_sy = screen_w / 2.0, screen_h / 2.0
 
                     elif event.key == pygame.K_RIGHTBRACKET and terrain_mode is not None:
-                        terrain_brush = min(8, terrain_brush + 1)
+                        terrain_brush = min(7, terrain_brush + 1)
 
                     elif event.key == pygame.K_LEFTBRACKET and terrain_mode is not None:
                         terrain_brush = max(1, terrain_brush - 1)
@@ -1063,9 +1070,9 @@ def main():
                     tx, ty = screen_to_world(mx, my, cam_x, cam_y, current_zoom)
                     col = int(tx)
                     row = int(ty)
-                    r = terrain_brush - 1
-                    hx0, hy0 = world_to_screen(col - r, row - r, cam_x, cam_y, current_zoom)
-                    hx1, hy1 = world_to_screen(col + r + 1, row + r + 1, cam_x, cam_y, current_zoom)
+                    row0, row1, col0, col1 = _brush_bounds(row, col, terrain_brush)
+                    hx0, hy0 = world_to_screen(col0, row0, cam_x, cam_y, current_zoom)
+                    hx1, hy1 = world_to_screen(col1 + 1, row1 + 1, cam_x, cam_y, current_zoom)
                     pygame.draw.rect(
                         screen,
                         color,
@@ -1073,7 +1080,7 @@ def main():
                         2,
                     )
                     if terrain_brush > 1:
-                        brush_label = font_ui.render(f"{terrain_brush * 2 - 1}x{terrain_brush * 2 - 1}", True, color)
+                        brush_label = font_ui.render(f"{terrain_brush}x{terrain_brush}", True, color)
                         screen.blit(brush_label, (mx + 8, my - 16))
 
         pygame.display.flip()
