@@ -16,7 +16,7 @@ EAT_DURATION             = 20.0   # sheep graze slowly — long eating sessions
 HUNGER_THRESHOLD         = 0.55
 HUNGER_URGENCY_THRESHOLD = 0.65
 STARVING_THRESHOLD       = 0.80
-REGROWTH_TIME            = 432.0   # 20% slower regrowth; more pressure on herds to migrate
+REGROWTH_TIME            = 750.0   # ~2.5 days before eaten grass is eligible to regrow
 
 # ---------------------------------------------------------------------------
 # HP
