@@ -141,6 +141,13 @@ WOLF_PACK_COHESION_INNER  = 7.0    # wolves should idle in a compact knot around
 WOLF_PACK_MAX_STRAY       = 42.0   # only very unusual pursuits should peel wolves off the pack
 WOLF_PACK_ALPHA_FOLLOW_DIST = 4.5  # most wolves should hang close to the alpha
 WOLF_PACK_ALPHA_PULL      = 12.0   # non-alphas actively follow the alpha instead of drifting
+WOLF_PACK_TRAVEL_PULL     = 9.5
+WOLF_PACK_FORMATION_SPACING = 2.6
+WOLF_PACK_FORMATION_DEPTH = 3.4
+WOLF_PACK_VENTURE_RADIUS  = 600.0
+WOLF_PACK_RETURN_RADIUS   = 24.0
+WOLF_PACK_RETURN_PULL     = 4.0
+WOLF_REST_HUNGER_PAUSE_MAX = 0.26
 
 # Size / sex presentation and appetite
 WOLF_BASE_DRAW_SCALE      = 1.20   # all wolves render 20% larger than before
@@ -338,9 +345,14 @@ class Wolf:
         self.mother_id = mother_id
         self.father_id = father_id
         self.mate_bond_id: int | None = None
+        self.preferred_mate_id: int | None = None
         self.beta_timer = 0.0
         self.true_loner = random.random() < WOLF_TRUE_LONER_CHANCE
         self._formation_slot = random.randrange(8)
+        self.reproductive_success = 0
+        self.mates_count = 0
+        self.mate_history_ids: set[int] = set()
+        self.wary_of_wolf_ids: set[int] = set()
 
         # --- Genetics ---
         def _cg(val, r):
@@ -436,9 +448,26 @@ class Wolf:
         self.pack_mode_timer       = 0.0
         self.pack_alpha_id         = self.wolf_id
         self.pack_is_alpha         = True
+        self.pack_rank             = 1
+        self.pack_reputation       = 1.0
         self.pack_camp_x           = tile_x
         self.pack_camp_y           = tile_y
         self.pack_blocked_corpse_id = None
+        self.pack_move_x           = tile_x
+        self.pack_move_y           = tile_y
+        self.pack_resting          = False
+        self.pack_rest_timer       = 0.0
+        self.pack_solo_hunt_ok     = False
+        self.pack_memory_x         = float(tile_x)
+        self.pack_memory_y         = float(tile_y)
+        self.solo_excursion        = False
+        self.solo_origin_pack_id   = -1
+        self.was_exiled            = False
+        self.former_pack_rank      = 1
+        self.pair_bond_only        = False
+        self.exile_home_x          = float(tile_x)
+        self.exile_home_y          = float(tile_y)
+        self.exile_home_radius     = 0.0
 
         # Social play
         self._play_target       = None   # ref to packmate being chased
@@ -812,6 +841,87 @@ class Wolf:
             pull *= 1.35
         return (ddx / dist) * pull, (ddy / dist) * pull
 
+    def _pack_travel_goal(self) -> tuple[float, float]:
+        if self.pack_size <= 1 or self.solo_excursion:
+            return self.pack_move_x, self.pack_move_y
+
+        goal_x, goal_y = self.pack_move_x, self.pack_move_y
+        if self.pack_is_alpha:
+            return goal_x, goal_y
+
+        hd_x = goal_x - self.pack_cx
+        hd_y = goal_y - self.pack_cy
+        hd_d = math.hypot(hd_x, hd_y)
+        if hd_d < 0.001:
+            ux, uy = 1.0, 0.0
+        else:
+            ux, uy = hd_x / hd_d, hd_y / hd_d
+        px, py = -uy, ux
+
+        slot = max(0, self.pack_rank - 2)
+        row = slot // 3
+        col = (slot % 3) - 1
+        return (
+            self.pack_cx - ux * (row + 1) * WOLF_PACK_FORMATION_DEPTH + px * col * WOLF_PACK_FORMATION_SPACING,
+            self.pack_cy - uy * (row + 1) * WOLF_PACK_FORMATION_DEPTH + py * col * WOLF_PACK_FORMATION_SPACING,
+        )
+
+    def _pack_travel_delta(self, dt: float) -> tuple[float, float]:
+        if self.pack_size <= 1 or self.true_loner or self.solo_excursion:
+            return 0.0, 0.0
+        goal_x, goal_y = self._pack_travel_goal()
+        ddx = goal_x - self.tx
+        ddy = goal_y - self.ty
+        dist = math.hypot(ddx, ddy)
+        if dist < 0.001:
+            return 0.0, 0.0
+        pull = min(1.0, dist / 10.0) * WOLF_PACK_TRAVEL_PULL * dt
+        if self.pack_resting:
+            pull *= 0.45
+        return (ddx / dist) * pull, (ddy / dist) * pull
+
+    def _should_pause_hunger(self) -> bool:
+        if self.state == Wolf.EAT:
+            return False
+        if self.hunger > WOLF_REST_HUNGER_PAUSE_MAX:
+            return False
+        if self._meal_cooldown <= 0.0:
+            return False
+        return self.pack_resting or self.state == Wolf.LOUNGE
+
+    def _update_pack_memory(self):
+        if self.pack_id >= 0 and not self.solo_excursion:
+            self.pack_memory_x = self.pack_cx
+            self.pack_memory_y = self.pack_cy
+            self.solo_origin_pack_id = self.pack_id
+
+    def _start_solo_excursion(self) -> bool:
+        if self.solo_excursion or self.pack_size <= 1 or self.pair_bond_only:
+            return False
+        self.solo_excursion = True
+        self.solo_origin_pack_id = self.pack_id
+        self.pack_memory_x = self.pack_cx
+        self.pack_memory_y = self.pack_cy
+        self.former_pack_rank = max(self.former_pack_rank, self.pack_rank)
+        self.pack_id = -1
+        self.pack_size = 1
+        self.pack_hunt_target = None
+        return True
+
+    def _end_solo_excursion_if_home(self) -> bool:
+        if not self.solo_excursion:
+            return False
+        ddx = self.pack_memory_x - self.tx
+        ddy = self.pack_memory_y - self.ty
+        if math.hypot(ddx, ddy) > WOLF_PACK_RETURN_RADIUS:
+            return False
+        if self._meal_cooldown <= 0.0 and self.hunger >= WOLF_HUNGER_HUNT:
+            return False
+        self.solo_excursion = False
+        self.state = Wolf.WALK
+        self.timer = random.uniform(WOLF_WANDER_INTERVAL_MIN, WOLF_WANDER_INTERVAL_MAX)
+        return True
+
     def _sheep_avoidance_delta(self, sheep_list: list, dt: float) -> tuple:
         """Gently push wolf away from nearby sheep clusters when not hunting."""
         if self.hunger >= WOLF_HUNGER_HUNT and self.pack_mode == "hunt":
@@ -841,6 +951,17 @@ class Wolf:
         t    = max(0.0, 1.0 - dist / WOLF_SHEEP_AVOID_RADIUS)
         push = WOLF_SHEEP_AVOID_FORCE * t * dt
         return (fdx / dist) * push, (fdy / dist) * push
+
+    def _exile_home_avoidance_delta(self, dt: float) -> tuple[float, float]:
+        if self.pack_id >= 0 or not self.was_exiled or self.exile_home_radius <= 0.0:
+            return 0.0, 0.0
+        ddx = self.tx - self.exile_home_x
+        ddy = self.ty - self.exile_home_y
+        dist = math.hypot(ddx, ddy)
+        if dist >= self.exile_home_radius or dist < 0.001:
+            return 0.0, 0.0
+        push = (1.0 - dist / self.exile_home_radius) * 5.5 * dt
+        return (ddx / dist) * push, (ddy / dist) * push
 
     def _find_play_partner(self, wolf_list: list):
         """Return a nearby satiated packmate to play with, or None."""
@@ -926,6 +1047,8 @@ class Wolf:
                         continue
                     dist = math.sqrt(dist_sq)
                     score = 1.2 - dist / max(1.0, limit)
+                    if self.preferred_mate_id == other.wolf_id:
+                        score += WOLF_MATE_BOND_BONUS * 1.2
                     if self.pack_id >= 0 and other.pack_id == self.pack_id:
                         score += 0.9
                     if other.hunger < WOLF_REPRODUCE_HUNGER:
@@ -946,7 +1069,8 @@ class Wolf:
         return (ddx / dist) * pull, (ddy / dist) * pull
 
     def _mate_hunt_support_target(self, wolf_list: list):
-        if self.mate_bond_id is None or self.hunger > WOLF_MATE_SUPPORT_HUNGER:
+        support_limit = 0.58 if self.pair_bond_only else WOLF_MATE_SUPPORT_HUNGER
+        if self.mate_bond_id is None or self.hunger > support_limit:
             return None
         mate = self._find_wolf_by_id(wolf_list, self.mate_bond_id)
         if mate is None or not mate.is_adult:
@@ -1046,7 +1170,9 @@ class Wolf:
         self._corpse_commit_timer = 0.0
         self._corpse_approach_timer = 0.0
         self._enter_lounge()
-        if self._lounge_timer > 0:
+        if self.solo_excursion:
+            self.state = Wolf.WALK
+        elif self._lounge_timer > 0:
             self.state = Wolf.LOUNGE
         else:
             self.state = Wolf.IDLE
@@ -1149,6 +1275,8 @@ class Wolf:
             score = (1.0 - other.hunger) + (1.0 - abs(other.tx - self.tx) / max(1.0, WOLF_MATE_RADIUS))
             if self.mate_bond_id == other.wolf_id:
                 score += WOLF_MATE_BOND_BONUS
+            if self.preferred_mate_id == other.wolf_id:
+                score += WOLF_MATE_BOND_BONUS * 1.25
             if self.pack_id >= 0 and other.pack_id == self.pack_id:
                 score += WOLF_PACKMATE_MATE_BONUS
             elif self.pack_id >= 0 or other.pack_id >= 0:
@@ -1163,6 +1291,13 @@ class Wolf:
         other = best_mate
         self.mate_bond_id = other.wolf_id
         other.mate_bond_id = self.wolf_id
+        self.preferred_mate_id = other.wolf_id
+        if self.wolf_id not in other.mate_history_ids:
+            other.mate_history_ids.add(self.wolf_id)
+            other.mates_count += 1
+        if other.wolf_id not in self.mate_history_ids:
+            self.mate_history_ids.add(other.wolf_id)
+            self.mates_count += 1
 
         def _inherit(a, b, attr, r):
             mid = (getattr(a, attr) + getattr(b, attr)) / 2.0
@@ -1199,6 +1334,8 @@ class Wolf:
                                  + WOLF_GESTATION_PER_CUB * max(0, litter_count - WOLF_LITTER_MIN))
                                 * self.genetic_gestation)
         self._pending_litter = pending
+        self.reproductive_success += litter_count
+        other.reproductive_success += litter_count
         self.reproduce_cooldown  = WOLF_REPRODUCE_COOLDOWN * 0.65
         other.reproduce_cooldown = WOLF_REPRODUCE_COOLDOWN * 0.45
         self.hunger  = min(1.0, self.hunger + 0.04 * litter_count)
@@ -1230,6 +1367,7 @@ class Wolf:
                     pup.hunger  = 0.0
                     pup.pack_id = self.pack_id
                     pup.mate_bond_id = None
+                    pup.pair_bond_only = self.pair_bond_only
                     new_wolves.append(pup)
                     break
 
@@ -1276,9 +1414,10 @@ class Wolf:
 
         sx, sy = self._separation_delta(wolves, dt)
         px, py = self._pack_cohesion_delta(dt)
+        gx, gy = self._pack_travel_delta(dt)
         spd    = self.move_speed * speed_mult
-        new_tx = self.tx + self.dx * spd * dt + sx + px
-        new_ty = self.ty + self.dy * spd * dt + sy + py
+        new_tx = self.tx + self.dx * spd * dt + sx + px + gx
+        new_ty = self.ty + self.dy * spd * dt + sy + py + gy
 
         self.tx, self.ty, _ = advance_until_blocked(grid, self.tx, self.ty, new_tx, new_ty)
 
@@ -1317,6 +1456,8 @@ class Wolf:
             self._lounge_timer = max(0.0, self._lounge_timer - dt)
         if self._pup_feed_timer > 0:
             self._pup_feed_timer = max(0.0, self._pup_feed_timer - dt)
+        self._update_pack_memory()
+        self._end_solo_excursion_if_home()
 
         # Pup daily mortality check
         if not self.is_adult:
@@ -1328,7 +1469,7 @@ class Wolf:
                     return
 
         # --- Hunger & HP ---
-        if self.state != Wolf.EAT:
+        if self.state != Wolf.EAT and not self._should_pause_hunger():
             self.hunger = min(1.0, self.hunger + WOLF_HUNGER_RATE * self.appetite_mult * dt)
         if self.hunger >= 1.0:
             self.hp = max(0.0, self.hp - WOLF_HP_DRAIN_RATE * dt)
@@ -1396,6 +1537,9 @@ class Wolf:
             if self.pack_mode == "camp":
                 self._lounge_anchor_x = self.pack_camp_x
                 self._lounge_anchor_y = self.pack_camp_y
+            elif self.pack_size > 1 and not self.solo_excursion:
+                self._lounge_anchor_x = self.pack_cx
+                self._lounge_anchor_y = self.pack_cy
             # Break lounge if desperately hungry
             if self.hunger >= WOLF_LOUNGE_HUNT_HUNGER and self.pack_mode == "hunt":
                 self._lounge_timer = 0.0
@@ -1464,8 +1608,9 @@ class Wolf:
                     sx, sy = self._separation_delta(wolf_list, dt)
                     px, py = self._pack_cohesion_delta(dt)
                     fx, fy = self._pack_alpha_follow_delta(dt)
-                    new_tx = self.tx + self.dx * self.move_speed * 0.32 * dt + sx + px + fx
-                    new_ty = self.ty + self.dy * self.move_speed * 0.32 * dt + sy + py + fy
+                    gx, gy = self._pack_travel_delta(dt)
+                    new_tx = self.tx + self.dx * self.move_speed * 0.32 * dt + sx + px + fx + gx
+                    new_ty = self.ty + self.dy * self.move_speed * 0.32 * dt + sy + py + fy + gy
                     old_tx, old_ty = self.tx, self.ty
                     self.tx, self.ty, blocked = advance_until_blocked(
                         grid, self.tx, self.ty, new_tx, new_ty
@@ -1655,7 +1800,14 @@ class Wolf:
                 return
 
             # Pack cohesion enforcement — too far from packmates, return first
-            if self.pack_size > 1 and not self.true_loner:
+            if self.solo_excursion:
+                ddx_home = self.tx - self.pack_memory_x
+                ddy_home = self.ty - self.pack_memory_y
+                if math.hypot(ddx_home, ddy_home) > WOLF_PACK_VENTURE_RADIUS and self._hunt_target is None:
+                    self.state = Wolf.WALK
+                    self.timer = random.uniform(WOLF_WANDER_INTERVAL_MIN, WOLF_WANDER_INTERVAL_MAX)
+                    return
+            elif self.pack_size > 1 and not self.true_loner:
                 ddx_p = self.pack_cx - self.tx
                 ddy_p = self.pack_cy - self.ty
                 pack_dist = math.sqrt(ddx_p * ddx_p + ddy_p * ddy_p)
@@ -1725,7 +1877,8 @@ class Wolf:
             if self._scan_timer <= 0:
                 self._scan_timer = WOLF_SCAN_INTERVAL
                 corpse = self._find_nearest_corpse(sheep_list, wolf_list)
-                prefer_live_pack_hunt = (self.pack_size > 1 and not self.true_loner
+                prefer_live_pack_hunt = (not self.solo_excursion
+                                         and self.pack_size > 1 and not self.true_loner
                                          and self.pack_hunt_target is not None
                                          and self.pack_hunt_target.alive
                                          and self.pack_hunt_target.dead_state is None)
@@ -1741,7 +1894,7 @@ class Wolf:
                     return
                 # Follow the pack's shared live target when possible
                 pack_t = self.pack_hunt_target
-                if (pack_t is not None and pack_t.alive
+                if (not self.solo_excursion and pack_t is not None and pack_t.alive
                         and pack_t.dead_state is None):
                     target = pack_t
                     self._hunt_target = target
@@ -1785,7 +1938,7 @@ class Wolf:
                 self._begin_lunge(target)
                 return
 
-            if self.pack_size > 1 and not self.true_loner:
+            if self.pack_size > 1 and not self.true_loner and not self.solo_excursion:
                 ring_r = max(WOLF_LUNGE_STOP_DIST + 0.45, self.collision_radius + 0.55)
                 hunt_x, hunt_y = self._target_ring_point(target.tx, target.ty, ring_r)
                 self._move_toward(hunt_x, hunt_y, dt, grid, wolf_list)
@@ -1798,13 +1951,19 @@ class Wolf:
         # Should we start hunting?
         # Wolves in camp can still forage if they missed the feast and are getting hungry
         can_seek_food = self._meal_cooldown <= 0.0 and (
-            self.pack_mode != "camp" or self.hunger >= 0.62
+            self.solo_excursion or self.pack_mode != "camp" or self.hunger >= 0.62
         )
-        mate_support = self._mate_hunt_support_target(wolf_list) if (self.pack_mode == "hunt" and can_seek_food) else None
+        if (not self.solo_excursion and can_seek_food and self.pack_solo_hunt_ok
+                and self._hunt_target is None):
+            self._start_solo_excursion()
+            can_seek_food = self._meal_cooldown <= 0.0
+
+        mate_support = self._mate_hunt_support_target(wolf_list) if ((self.pack_mode == "hunt" or self.pair_bond_only) and can_seek_food) else None
         defense_target = self._pack_defense_target(sheep_list) if self.pack_mode != "camp" else None
         should_hunt = (
             defense_target is not None or
             (can_seek_food and (
+                (self.solo_excursion and self.hunger >= WOLF_HUNGER_HUNT) or
                 self.hunger >= WOLF_HUNGER_DESPERATE or
                 (self.pack_mode == "hunt" and (
                     self.hunger >= WOLF_HUNGER_HUNT or
@@ -1818,7 +1977,8 @@ class Wolf:
         # Corpses always take priority — check them first (smell range 1000 tiles)
         if can_seek_food and self.pack_mode != "chill" and self._scan_timer <= 0:
             corpse = self._find_nearest_corpse(sheep_list, wolf_list)
-            prefer_live_pack_hunt = (self.pack_size > 1 and not self.true_loner
+            prefer_live_pack_hunt = (not self.solo_excursion
+                                     and self.pack_size > 1 and not self.true_loner
                                      and self.pack_hunt_target is not None
                                      and self.pack_hunt_target.alive
                                      and self.pack_hunt_target.dead_state is None)
@@ -1843,6 +2003,7 @@ class Wolf:
             if target is None and mate_support not in (None, True):
                 target = mate_support
             if (target is None and self.pack_hunt_target is not None
+                    and not self.solo_excursion
                     and self.pack_hunt_target.alive
                     and self.pack_hunt_target.dead_state is None):
                 target = self.pack_hunt_target
@@ -1878,9 +2039,29 @@ class Wolf:
         if self.timer <= 0:
             if self.state == Wolf.IDLE:
                 # Switch to wander
-                angle   = random.uniform(0, 2 * math.pi)
-                self.dx = math.cos(angle)
-                self.dy = math.sin(angle)
+                if self.solo_excursion and (self._meal_cooldown > 0.0 or self.hunger < WOLF_HUNGER_HUNT):
+                    ddx = self.pack_memory_x - self.tx
+                    ddy = self.pack_memory_y - self.ty
+                    dist = math.hypot(ddx, ddy)
+                    if dist > 0.001:
+                        self.dx = ddx / dist
+                        self.dy = ddy / dist
+                    else:
+                        self.dx = self.dy = 0.0
+                elif self.pack_size > 1 and not self.solo_excursion:
+                    goal_x, goal_y = self._pack_travel_goal()
+                    ddx = goal_x - self.tx
+                    ddy = goal_y - self.ty
+                    dist = math.hypot(ddx, ddy)
+                    if dist > 0.001:
+                        self.dx = ddx / dist
+                        self.dy = ddy / dist
+                    else:
+                        self.dx = self.dy = 0.0
+                else:
+                    angle   = random.uniform(0, 2 * math.pi)
+                    self.dx = math.cos(angle)
+                    self.dy = math.sin(angle)
                 self._refresh_facing()
                 self.state = Wolf.WALK
                 self.timer = random.uniform(WOLF_PATROL_INTERVAL_MIN, WOLF_PATROL_INTERVAL_MAX)
@@ -1895,18 +2076,40 @@ class Wolf:
         if self.state == Wolf.WALK:
             sx, sy = self._separation_delta(wolf_list, dt)
             ax, ay = self._sheep_avoidance_delta(sheep_list, dt)
+            hx, hy = self._exile_home_avoidance_delta(dt)
             px, py = self._pack_cohesion_delta(dt)
             fx, fy = self._pack_alpha_follow_delta(dt)
+            gx, gy = self._pack_travel_delta(dt)
             mx, my = self._mate_bond_delta(wolf_list, dt)
             sx += mx
             sy += my
             qx, qy = self._mate_seek_delta(wolf_list, dt)
             ax += qx
             ay += qy
+            ax += hx
+            ay += hy
+            if self.solo_excursion and (self._meal_cooldown > 0.0 or self.hunger < WOLF_HUNGER_HUNT):
+                ddx = self.pack_memory_x - self.tx
+                ddy = self.pack_memory_y - self.ty
+                dist = math.hypot(ddx, ddy)
+                if dist > 0.001:
+                    self.dx = ddx / dist
+                    self.dy = ddy / dist
+            elif self.pack_size > 1 and not self.solo_excursion:
+                goal_x, goal_y = self._pack_travel_goal()
+                ddx = goal_x - self.tx
+                ddy = goal_y - self.ty
+                dist = math.hypot(ddx, ddy)
+                if dist > 0.001:
+                    self.dx = ddx / dist
+                    self.dy = ddy / dist
+                    self._refresh_facing()
             self._roll_timer = 0.0
             drift_speed = self.move_speed * (0.55 if self.pack_size > 1 and not self.pack_is_alpha else 0.82 if self.pack_size > 1 else 1.0)
-            new_tx = self.tx + self.dx * drift_speed * dt + sx + ax + px + fx
-            new_ty = self.ty + self.dy * drift_speed * dt + sy + ay + py + fy
+            if self.pack_resting:
+                drift_speed *= 0.45
+            new_tx = self.tx + self.dx * drift_speed * dt + sx + ax + px + fx + gx
+            new_ty = self.ty + self.dy * drift_speed * dt + sy + ay + py + fy + gy
             old_tx, old_ty = self.tx, self.ty
             self.tx, self.ty, blocked = advance_until_blocked(
                 grid, self.tx, self.ty, new_tx, new_ty

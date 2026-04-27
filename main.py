@@ -1016,7 +1016,7 @@ def main():
             herd_manager.update(dt_sim, sheep_list, grid, wolves=wolf_list)
             Ram.update_fights(dt_sim)
 
-            wolf_pack_manager.update(dt_sim, wolf_list, sheep_list)
+            wolf_pack_manager.update(dt_sim, wolf_list, sheep_list, grid)
             new_wolves: list[Wolf] = []
             for wolf in wolf_list:
                 wolf.update(dt_sim, grid, sheep_list, wolf_list, new_wolves)
