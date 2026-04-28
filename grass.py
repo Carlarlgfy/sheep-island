@@ -1,18 +1,20 @@
 import math
 import pygame
 import random
-from mapgen import WATER, SAND, DIRT, GRASS, WALL
+from mapgen import WATER, SAND, DIRT, GRASS, WALL, TUNDRA, SNOW
 
 # ---------------------------------------------------------------------------
 # Base colours — slightly richer / darker than the old flat values
 # ---------------------------------------------------------------------------
 
 BASE_COLORS = {
-    WATER: ( 38, 100, 182),
-    SAND:  (198, 176, 112),
-    DIRT:  (115,  82,  44),
-    GRASS: ( 48, 108,  32),
-    WALL:  (138,  74,  58),
+    WATER:  ( 38, 100, 182),
+    SAND:   (198, 176, 112),
+    DIRT:   (115,  82,  44),
+    GRASS:  ( 48, 108,  32),
+    WALL:   (138,  74,  58),
+    TUNDRA: (188, 172, 128),
+    SNOW:   (228, 236, 244),
 }
 
 # Exported so main.py can use it for the background fill
@@ -20,10 +22,11 @@ WATER_COLOR = BASE_COLORS[WATER]
 
 # Elevation priority: higher number = visually "raised" above lower numbers.
 # Shadow strips are drawn on the high-terrain side of any high→low border.
-_PRIORITY = {WATER: 0, SAND: 1, DIRT: 2, GRASS: 3, WALL: 4}
+_PRIORITY = {WATER: 0, SAND: 1, DIRT: 2, GRASS: 3, TUNDRA: 3, WALL: 4, SNOW: 5}
 
 # Per-terrain brightness variation range (fraction of base channel value)
-_SHADE_VAR = {WATER: 0.08, SAND: 0.13, DIRT: 0.11, GRASS: 0.14, WALL: 0.08}
+_SHADE_VAR = {WATER: 0.08, SAND: 0.13, DIRT: 0.11, GRASS: 0.14, WALL: 0.08,
+              TUNDRA: 0.10, SNOW: 0.04}
 
 
 # ---------------------------------------------------------------------------
@@ -286,11 +289,13 @@ class TerrainRenderer:
     # ------------------------------------------------------------------
 
     def _draw_texture(self, screen, terrain, col, row, sx, sy, ts):
-        if   terrain == GRASS: self._tex_grass(screen, col, row, sx, sy, ts)
-        elif terrain == DIRT:  self._tex_dirt (screen, col, row, sx, sy, ts)
-        elif terrain == SAND:  self._tex_sand (screen, col, row, sx, sy, ts)
-        elif terrain == WATER: self._tex_water(screen, col, row, sx, sy, ts)
-        elif terrain == WALL:  self._tex_wall (screen, col, row, sx, sy, ts)
+        if   terrain == GRASS:  self._tex_grass (screen, col, row, sx, sy, ts)
+        elif terrain == DIRT:   self._tex_dirt  (screen, col, row, sx, sy, ts)
+        elif terrain == SAND:   self._tex_sand  (screen, col, row, sx, sy, ts)
+        elif terrain == WATER:  self._tex_water (screen, col, row, sx, sy, ts)
+        elif terrain == WALL:   self._tex_wall  (screen, col, row, sx, sy, ts)
+        elif terrain == TUNDRA: self._tex_tundra(screen, col, row, sx, sy, ts)
+        elif terrain == SNOW:   self._tex_snow  (screen, col, row, sx, sy, ts)
 
     def _tex_grass(self, screen, col, row, sx, sy, ts):
         """2–3 dark blade marks + 1 bright highlight per tile."""
@@ -367,6 +372,36 @@ class TerrainRenderer:
         if ts >= 6:
             pygame.draw.rect(screen, brick, (sx + 1, sy + 1, max(1, ts - 2), max(1, ts - 2)), 1)
 
+    def _tex_tundra(self, screen, col, row, sx, sy, ts):
+        """Sparse dead-grass tufts — pale beige marks on frozen ground."""
+        ts1 = max(1, ts - 1)
+        for i in range(3):
+            h  = _h(col * 9 + i, row * 11 + i)
+            if (h >> 22) & 3 == 0:
+                continue
+            px = sx + (h >> 4)  % ts1
+            py = sy + (h >> 12) % ts1
+            if (h >> 20) & 1:
+                pygame.draw.rect(screen, (160, 145, 100), (px, py, 1, 2))
+            else:
+                pygame.draw.rect(screen, (210, 198, 160), (px, py, 1, 1))
+
+    def _tex_snow(self, screen, col, row, sx, sy, ts):
+        """Small crystalline dots and a subtle blue-white sparkle."""
+        ts1 = max(1, ts - 1)
+        for i in range(4):
+            h  = _h(col * 3 + i, row * 5 + i, i + 7)
+            if (h >> 22) & 3 != 0:
+                continue
+            px = sx + (h >> 4)  % ts1
+            py = sy + (h >> 12) % ts1
+            pygame.draw.rect(screen, (255, 255, 255), (px, py, 1, 1))
+        # occasional pale-blue glint
+        hg = _h(col * 41, row * 37)
+        if (hg >> 20) & 7 == 0:
+            pygame.draw.rect(screen, (200, 220, 240),
+                             (sx + (hg >> 4) % ts1, sy + (hg >> 12) % ts1, 1, 1))
+
     # ------------------------------------------------------------------
     # Edge blending / border shadows
     # ------------------------------------------------------------------
@@ -411,6 +446,14 @@ class TerrainRenderer:
                 # Slightly lighter green fringe where grass overhangs dirt
                 fringe = _lighten(base_color, 14)
                 pygame.draw.rect(screen, fringe, strip)
+
+            elif terrain == SNOW and n in (TUNDRA, GRASS, DIRT):
+                # Crisp bright-white edge where snow meets lower terrain
+                pygame.draw.rect(screen, (248, 252, 255), strip)
+
+            elif terrain == TUNDRA and n == GRASS:
+                # Pale fringe where frozen tundra meets grass
+                pygame.draw.rect(screen, (210, 200, 155), strip)
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +542,85 @@ class GrassSpread:
             if self.grid[r][c] != DIRT:
                 continue
             self.grid[r][c] = GRASS
+            if notify:
+                notify(r, c)
+            self.on_tile_changed(r, c)
+
+
+# ---------------------------------------------------------------------------
+# Tundra spreading (very slow — frozen biome encroaches on bare dirt)
+# ---------------------------------------------------------------------------
+
+_TUNDRA_SPREAD_MIN = 0.003   # 0.3% per day with 1 tundra neighbor
+_TUNDRA_SPREAD_MAX = 0.05    # 5.0% per day with 8 tundra neighbors
+
+
+class TundraSpread:
+    """
+    Tracks the frontier of dirt tiles adjacent to tundra.  Each frame, every
+    frontier tile gets a very low probabilistic roll to become tundra.
+    Tundra spreads ~10× slower than grass so the biome boundary changes slowly.
+    """
+
+    def __init__(self, grid: list[list[str]]):
+        self.grid = grid
+        self.rows = len(grid)
+        self.cols = len(grid[0]) if self.rows else 0
+        self.frontier: set[tuple[int, int]] = set()
+        for r in range(self.rows):
+            for c in range(self.cols):
+                if grid[r][c] == DIRT and self._count_tundra_neighbors(r, c) > 0:
+                    self.frontier.add((r, c))
+
+    def _neighbor_offsets(self):
+        return (
+            (-1, -1), (-1, 0), (-1, 1),
+            (0, -1),           (0, 1),
+            (1, -1),  (1, 0),  (1, 1),
+        )
+
+    def _count_tundra_neighbors(self, r: int, c: int) -> int:
+        count = 0
+        for dr, dc in self._neighbor_offsets():
+            nr, nc = r + dr, c + dc
+            if 0 <= nr < self.rows and 0 <= nc < self.cols:
+                if self.grid[nr][nc] == TUNDRA:
+                    count += 1
+        return count
+
+    def on_tile_changed(self, r: int, c: int):
+        """Refresh frontier membership for a changed tile and its neighbors."""
+        for dr, dc in ((0, 0), *self._neighbor_offsets()):
+            nr, nc = r + dr, c + dc
+            if not (0 <= nr < self.rows and 0 <= nc < self.cols):
+                continue
+            if self.grid[nr][nc] == DIRT and self._count_tundra_neighbors(nr, nc) > 0:
+                self.frontier.add((nr, nc))
+            else:
+                self.frontier.discard((nr, nc))
+
+    def update(self, dt_sim: float, notify=None):
+        if dt_sim <= 0 or not self.frontier:
+            return
+
+        to_convert = []
+        for (r, c) in list(self.frontier):
+            if self.grid[r][c] != DIRT:
+                self.frontier.discard((r, c))
+                continue
+            n = self._count_tundra_neighbors(r, c)
+            if n == 0:
+                self.frontier.discard((r, c))
+                continue
+            p_day = _TUNDRA_SPREAD_MIN + (_TUNDRA_SPREAD_MAX - _TUNDRA_SPREAD_MIN) * (n - 1) / 7
+            p_tick = p_day * dt_sim / _DAY_DURATION
+            if random.random() < p_tick:
+                to_convert.append((r, c))
+
+        for (r, c) in to_convert:
+            if self.grid[r][c] != DIRT:
+                continue
+            self.grid[r][c] = TUNDRA
             if notify:
                 notify(r, c)
             self.on_tile_changed(r, c)

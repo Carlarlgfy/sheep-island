@@ -18,7 +18,7 @@ import random
 
 import pygame
 
-from mapgen import WATER, GRASS, is_walkable_tile, advance_until_blocked
+from mapgen import WATER, GRASS, SNOW, is_walkable_tile, advance_until_blocked
 
 _WOLF_DIR = os.path.join(os.path.dirname(__file__), "brown gray female wolf")
 
@@ -101,6 +101,10 @@ WOLF_GESTATION_RANGE      = 0.18
 # Pup early-mortality tracking
 WOLF_PUP_DEATH_DAILY      = 0.08   # 8%/day — pups are hard but the pack protects them
 DAY_DURATION              = 300.0  # sim-seconds per in-game day
+
+# Snow exposure damage (wolves are hardier than sheep in the cold)
+WOLF_SNOW_EXPOSURE_THRESHOLD = 450.0   # 1.5 days in snow before damage starts
+WOLF_SNOW_DAMAGE_RATE        = 0.2     # HP/sec once threshold is exceeded
 
 # Pup feeding (regurgitation — satiated adults feed nearby offspring)
 WOLF_PUP_FEED_RADIUS        = 9.0             # tiles — adult must be this close to a pup
@@ -485,6 +489,9 @@ class Wolf:
         # Earned growth (accumulated post-maturity; 0–1 each)
         self.earned_size           = 0.0   # extra bulk from good feeding
         self.earned_strength       = 0.0   # extra power from combat experience
+
+        # Snow exposure — accumulates while on snow; resets when leaving snow
+        self.snow_exposure = 0.0
 
         # Corpse state
         self.alive       = True
@@ -1476,6 +1483,19 @@ class Wolf:
         # Idle regen when satiated
         if self.state in (Wolf.IDLE, Wolf.LOUNGE, Wolf.PLAY_SUBMIT) and self.hunger < 0.45:
             self.hp = min(self.max_hp, self.hp + WOLF_HP_REGEN_RATE * dt)
+
+        # --- Snow exposure damage ---
+        _rows = len(grid)
+        _cols = len(grid[0]) if _rows else 0
+        _wr, _wc = int(self.ty), int(self.tx)
+        _on_snow = (0 <= _wr < _rows and 0 <= _wc < _cols
+                    and grid[_wr][_wc] == SNOW)
+        if _on_snow:
+            self.snow_exposure += dt
+            if self.snow_exposure >= WOLF_SNOW_EXPOSURE_THRESHOLD:
+                self.hp = max(0.0, self.hp - WOLF_SNOW_DAMAGE_RATE * dt)
+        else:
+            self.snow_exposure = 0.0
 
         # --- Old age / HP death ---
         if self.age >= self.lifespan or self.hp <= 0:

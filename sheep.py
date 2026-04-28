@@ -3,7 +3,7 @@ import math
 import random
 import os
 
-from mapgen import WATER, GRASS, DIRT, is_walkable_tile, advance_until_blocked
+from mapgen import WATER, GRASS, DIRT, SNOW, is_walkable_tile, advance_until_blocked
 
 _SHEEP_DIR = os.path.join(os.path.dirname(__file__), "white sheep")
 
@@ -32,6 +32,12 @@ HP_EAT_REGEN     = 0.3
 # Death / corpse
 # ---------------------------------------------------------------------------
 DAY_DURATION             = 300.0   # sim-seconds per in-game day (matches main.py)
+
+# ---------------------------------------------------------------------------
+# Snow exposure damage
+# ---------------------------------------------------------------------------
+SNOW_EXPOSURE_THRESHOLD  = 300.0   # 1 full day in snow before damage begins
+SNOW_DAMAGE_RATE         = 0.3     # HP/sec lost once threshold is exceeded
 CORPSE_FRESH_MIN         = DAY_DURATION * 1    # corpses should turn quickly once dead
 CORPSE_FRESH_MAX         = DAY_DURATION * 2
 CORPSE_DECAYED_MIN       = DAY_DURATION * 1
@@ -268,6 +274,9 @@ class Sheep:
         self.wolf_flee_dx     = 0.0
         self.wolf_flee_dy     = 0.0
         self._wolf_fear_timer = 0.0
+
+        # Snow exposure — accumulates while on snow; resets when leaving snow
+        self.snow_exposure    = 0.0
 
         self._schedule_idle()
 
@@ -1032,6 +1041,19 @@ class Sheep:
         # HP drains only when hunger is completely maxed — sheep with food barely lose HP
         if self.hunger >= 1.0:
             self.hp = max(0.0, self.hp - HP_DRAIN_RATE * dt)
+
+        # --- Snow exposure damage ---
+        cur_row, cur_col = int(self.ty), int(self.tx)
+        rows = len(grid)
+        cols = len(grid[0]) if rows else 0
+        on_snow = (0 <= cur_row < rows and 0 <= cur_col < cols
+                   and grid[cur_row][cur_col] == SNOW)
+        if on_snow:
+            self.snow_exposure += dt
+            if self.snow_exposure >= SNOW_EXPOSURE_THRESHOLD:
+                self.hp = max(0.0, self.hp - SNOW_DAMAGE_RATE * dt)
+        else:
+            self.snow_exposure = 0.0
 
         # --- Death checks ---
         if self.age >= self._effective_lifespan or self.hp <= 0:

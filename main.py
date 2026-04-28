@@ -6,11 +6,12 @@ import threading
 
 from mapgen import (
     MapGenerator, ContinentGenerator, flood_fill_grass,
-    WATER, SAND, DIRT, GRASS, WALL, is_walkable_tile, is_walkable_terrain,
+    WATER, SAND, DIRT, GRASS, WALL, TUNDRA, SNOW,
+    is_walkable_tile, is_walkable_terrain,
 )
 from sheep import Sheep
 from ram import Ram
-from grass import TerrainRenderer, GrassSpread, WATER_COLOR
+from grass import TerrainRenderer, GrassSpread, TundraSpread, WATER_COLOR
 from herd import HerdManager
 from wolf import Wolf
 from wolf_pack import WolfPackManager
@@ -61,11 +62,13 @@ SPAWNER_COLORS = {
 }
 
 TERRAIN_PAINT_COLORS = {
-    WATER: ( 38, 100, 182),
-    SAND:  (170, 150,  80),
-    DIRT:  (100,  70,  30),
-    GRASS: ( 40, 100,  25),
-    WALL:  (150,  78,  60),
+    WATER:  ( 38, 100, 182),
+    SAND:   (170, 150,  80),
+    DIRT:   (100,  70,  30),
+    GRASS:  ( 40, 100,  25),
+    WALL:   (150,  78,  60),
+    TUNDRA: (175, 160, 115),
+    SNOW:   (210, 220, 230),
 }
 
 
@@ -496,11 +499,12 @@ def _make_spawner_opt_btns():
 
 
 def _make_terrain_opt_btns():
-    """Create the four terrain paint option button dicts."""
-    labels = {WATER: "Water", SAND: "Sand", DIRT: "Dirt", GRASS: "Grass", WALL: "Brick"}
+    """Create terrain paint option button dicts."""
+    labels = {WATER: "Water", SAND: "Sand", DIRT: "Dirt", GRASS: "Grass",
+              WALL: "Brick", TUNDRA: "Tundra", SNOW: "Snow"}
     btn_w = 80
     btns = []
-    for key in (WATER, SAND, DIRT, GRASS, WALL):
+    for key in (WATER, SAND, DIRT, GRASS, WALL, TUNDRA, SNOW):
         col = TERRAIN_PAINT_COLORS[key]
         btns.append({
             "label":      labels[key],
@@ -560,6 +564,7 @@ def main():
     grid              = None
     terrain_renderer  = None
     grass_spread      = None
+    tundra_spread     = None
     current_seed      = random.randint(0, 999_999)
     current_zoom      = TILE_SIZE_DEFAULT
     target_zoom       = TILE_SIZE_DEFAULT
@@ -608,6 +613,8 @@ def main():
             terrain_renderer.mark_dirty(row, col)
         if grass_spread is not None:
             grass_spread.on_tile_changed(row, col)
+        if tundra_spread is not None:
+            tundra_spread.on_tile_changed(row, col)
 
     def _start_generation(gen_type: str, seed: int):
         nonlocal _gen_thread, _gen_event, _gen_result
@@ -951,6 +958,7 @@ def main():
                 cur_map_w        = len(grid[0]) if cur_map_h else ISLAND_W
                 terrain_renderer = TerrainRenderer(grid)
                 grass_spread     = GrassSpread(grid)
+                tundra_spread    = TundraSpread(grid)
                 default_ts       = CONTINENT_TILE_DEFAULT if _gen_type == "continent" else TILE_SIZE_DEFAULT
                 current_zoom     = float(default_ts)
                 target_zoom      = float(default_ts)
@@ -1041,6 +1049,8 @@ def main():
 
             if grass_spread is not None:
                 grass_spread.update(dt_sim, notify=mark_terrain_changed)
+            if tundra_spread is not None:
+                tundra_spread.update(dt_sim, notify=mark_terrain_changed)
 
             terrain_renderer.update(dt_sim)
 

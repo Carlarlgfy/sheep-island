@@ -2,13 +2,15 @@ import random
 import math
 from collections import deque
 
-WATER = "water"
-SAND  = "sand"
-DIRT  = "dirt"
-GRASS = "grass"
-WALL  = "wall"
+WATER  = "water"
+SAND   = "sand"
+DIRT   = "dirt"
+GRASS  = "grass"
+WALL   = "wall"
+TUNDRA = "tundra"
+SNOW   = "snow"
 
-TERRAIN_ORDER = [WATER, SAND, DIRT, GRASS, WALL]
+TERRAIN_ORDER = [WATER, SAND, DIRT, GRASS, WALL, TUNDRA, SNOW]
 
 
 def is_walkable_terrain(terrain: str) -> bool:
@@ -526,6 +528,21 @@ class ContinentGenerator(MapGenerator):
                 if iv > best:
                     best = iv
         return best
+
+    @staticmethod
+    def _terrain_from_value(v: float) -> str:
+        """Continent terrain: high-elevation center becomes tundra then snow."""
+        if v < 0.30:
+            return WATER
+        if v < 0.37:
+            return SAND
+        if v < 0.55:
+            return DIRT
+        if v < 0.73:
+            return GRASS
+        if v < 0.87:
+            return TUNDRA
+        return SNOW
 
     def _island_value(self, x: int, y: int,
                       cx: float, cy: float, _max_dist: float) -> float:
