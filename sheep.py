@@ -5,7 +5,7 @@ import os
 
 from mapgen import WATER, GRASS, DIRT, SNOW, is_walkable_tile, advance_until_blocked
 
-_SHEEP_DIR = os.path.join(os.path.dirname(__file__), "white sheep")
+_SHEEP_DIR = os.path.join(os.path.dirname(__file__), "fauna", "sheep")
 
 # ---------------------------------------------------------------------------
 # Hunger / eating  (+15% baseline hunger rate)

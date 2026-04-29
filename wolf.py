@@ -20,7 +20,7 @@ import pygame
 
 from mapgen import WATER, GRASS, SNOW, is_walkable_tile, advance_until_blocked
 
-_WOLF_DIR = os.path.join(os.path.dirname(__file__), "brown gray female wolf")
+_WOLF_DIR = os.path.join(os.path.dirname(__file__), "fauna", "wolf")
 
 # ---------------------------------------------------------------------------
 # Tuning constants

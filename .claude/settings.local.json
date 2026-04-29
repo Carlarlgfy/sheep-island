@@ -8,7 +8,10 @@
       "Bash(python:*)",
       "Bash(python3:*)",
       "Bash(.venv/bin/python:*)",
-      "Bash(ls /home/charles/Code/sheep-island/*.py)"
+      "Bash(ls /home/charles/Code/sheep-island/*.py)",
+      "Bash(mv \"white sheep/\"* fauna/sheep/)",
+      "Bash(mv \"brown gray female wolf/\"* fauna/wolf/)",
+      "Bash(mv \"White Ram/\"* fauna/ram/)"
     ]
   }
 }

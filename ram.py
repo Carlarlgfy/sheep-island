@@ -19,7 +19,7 @@ from sheep import (Sheep, HUNGER_RATE, HP_DRAIN_RATE, HP_MIN, DAY_DURATION,
                    GENETIC_STRENGTH_RANGE, REPRODUCE_COOLDOWN, MATE_SEARCH_RADIUS)
 import sheep as _sheep_module
 
-_RAM_DIR = os.path.join(os.path.dirname(__file__), "White Ram")
+_RAM_DIR = os.path.join(os.path.dirname(__file__), "fauna", "ram")
 
 # ---------------------------------------------------------------------------
 # Combat tuning — tweak these to adjust the feel of fights
