@@ -13,7 +13,7 @@ BASE_COLORS = {
     DIRT:   (115,  82,  44),
     GRASS:  ( 48, 108,  32),
     WALL:   (138,  74,  58),
-    TUNDRA: (188, 172, 128),
+    TUNDRA: (142, 136, 122),
     SNOW:   (228, 236, 244),
 }
 
@@ -26,7 +26,7 @@ _PRIORITY = {WATER: 0, SAND: 1, DIRT: 2, GRASS: 3, TUNDRA: 3, WALL: 4, SNOW: 5}
 
 # Per-terrain brightness variation range (fraction of base channel value)
 _SHADE_VAR = {WATER: 0.08, SAND: 0.13, DIRT: 0.11, GRASS: 0.14, WALL: 0.08,
-              TUNDRA: 0.10, SNOW: 0.04}
+              TUNDRA: 0.22, SNOW: 0.04}
 
 
 # ---------------------------------------------------------------------------
@@ -373,18 +373,30 @@ class TerrainRenderer:
             pygame.draw.rect(screen, brick, (sx + 1, sy + 1, max(1, ts - 2), max(1, ts - 2)), 1)
 
     def _tex_tundra(self, screen, col, row, sx, sy, ts):
-        """Sparse dead-grass tufts — pale beige marks on frozen ground."""
+        """Splotchy frozen ground — gray mud patches, pale frost, dead tuft marks."""
         ts1 = max(1, ts - 1)
-        for i in range(3):
-            h  = _h(col * 9 + i, row * 11 + i)
+        # Palette: dark mud, cold mid-gray, pale frost, warm dead-grass remnant
+        _palette = (
+            ( 88,  84,  76),   # dark gray mud
+            (108, 103,  92),   # cold mid gray
+            (165, 160, 148),   # pale gray
+            (195, 190, 175),   # frost highlight
+            (118, 110,  90),   # darker warm-gray (dead vegetation)
+            (152, 146, 132),   # neutral gray-beige
+        )
+        for i in range(6):
+            h  = _h(col * 7 + i, row * 13 + i, i + 3)
+            # ~75% of marks drawn — gives uneven coverage
             if (h >> 22) & 3 == 0:
                 continue
             px = sx + (h >> 4)  % ts1
             py = sy + (h >> 12) % ts1
-            if (h >> 20) & 1:
-                pygame.draw.rect(screen, (160, 145, 100), (px, py, 1, 2))
-            else:
-                pygame.draw.rect(screen, (210, 198, 160), (px, py, 1, 1))
+            color = _palette[(h >> 18) % len(_palette)]
+            # Occasionally draw a 2×2 splotch for coarser variation
+            sz = 2 if (h >> 16) & 3 == 0 else 1
+            sz = min(sz, ts1 - (px - sx), ts1 - (py - sy))
+            sz = max(1, sz)
+            pygame.draw.rect(screen, color, (px, py, sz, sz))
 
     def _tex_snow(self, screen, col, row, sx, sy, ts):
         """Small crystalline dots and a subtle blue-white sparkle."""
@@ -452,8 +464,8 @@ class TerrainRenderer:
                 pygame.draw.rect(screen, (248, 252, 255), strip)
 
             elif terrain == TUNDRA and n == GRASS:
-                # Pale fringe where frozen tundra meets grass
-                pygame.draw.rect(screen, (210, 200, 155), strip)
+                # Cold gray fringe where frozen tundra meets grass
+                pygame.draw.rect(screen, (160, 155, 142), strip)
 
 
 # ---------------------------------------------------------------------------

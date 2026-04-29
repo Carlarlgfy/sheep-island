@@ -12,6 +12,7 @@ from mapgen import (
 from sheep import Sheep
 from ram import Ram
 from grass import TerrainRenderer, GrassSpread, TundraSpread, WATER_COLOR
+from flower import Flower, FlowerManager
 from herd import HerdManager
 from wolf import Wolf
 from wolf_pack import WolfPackManager
@@ -28,7 +29,7 @@ CONTINENT_TILE_DEFAULT      = 4.0
 TILE_SIZE_MIN               = 0.5
 TILE_SIZE_MAX               = 48.0
 ZOOM_FACTOR                 = 1.1
-CAMERA_SPEED                = 55
+CAMERA_SPEED                = 28
 
 STATE_TITLE      = "title"
 STATE_MAP_SELECT = "map_select"
@@ -67,7 +68,7 @@ TERRAIN_PAINT_COLORS = {
     DIRT:   (100,  70,  30),
     GRASS:  ( 40, 100,  25),
     WALL:   (150,  78,  60),
-    TUNDRA: (175, 160, 115),
+    TUNDRA: (142, 136, 122),
     SNOW:   (210, 220, 230),
 }
 
@@ -271,7 +272,8 @@ def draw_play_ui(screen, font_ui, back_btn,
                  speed_btns, sim_speed_idx, day_number,
                  stats_btn=None, stats_open=False, stats_lines=None,
                  groups_btn=None, show_groups=False,
-                 cur_map_w=1024, cur_map_h=1024):
+                 cur_map_w=1024, cur_map_h=1024,
+                 flower_opt_btns=None, flower_mode=None):
 
     bar_rect = pygame.Rect(0, screen_h - BOTTOM_BAR_H, screen_w, BOTTOM_BAR_H)
     pygame.draw.rect(screen, (30, 30, 30), bar_rect)
@@ -280,8 +282,9 @@ def draw_play_ui(screen, font_ui, back_btn,
     spawner_btn["color"] = (55, 155, 75) if spawner_mode is not None else (70, 70, 110)
     draw_button(screen, spawner_btn, font_ui)
 
-    # Terrain button — highlight if a paint mode is active
-    terrain_btn["color"] = (160, 110, 40) if terrain_mode is not None else (70, 70, 110)
+    # Terrain button — highlight if a paint mode or flower mode is active
+    active_terrain = terrain_mode is not None or flower_mode is not None
+    terrain_btn["color"] = (160, 110, 40) if active_terrain else (70, 70, 110)
     draw_button(screen, terrain_btn, font_ui)
 
     if stats_btn is not None:
@@ -297,10 +300,16 @@ def draw_play_ui(screen, font_ui, back_btn,
         _draw_popup_panel(screen, font_ui, spawner_opt_btns, spawner_mode,
                           spawner_btn["rect"].x, screen_h - BOTTOM_BAR_H)
 
-    # --- Terrain popup ---
+    # --- Terrain popup (terrain types + flower sub-panel stacked above) ---
     if terrain_open:
-        _draw_popup_panel(screen, font_ui, terrain_opt_btns, terrain_mode,
-                          terrain_btn["rect"].x, screen_h - BOTTOM_BAR_H)
+        terrain_panel_top = _draw_popup_panel(
+            screen, font_ui, terrain_opt_btns, terrain_mode,
+            terrain_btn["rect"].x, screen_h - BOTTOM_BAR_H)
+        # Flower sub-panel sits directly above the terrain panel
+        if flower_opt_btns:
+            _draw_popup_panel(
+                screen, font_ui, flower_opt_btns, flower_mode,
+                terrain_btn["rect"].x, terrain_panel_top - 4)
 
     fs_hint = "F11: windowed" if is_fullscreen else "F11: fullscreen"
     map_label = f"{cur_map_w}x{cur_map_h}"
@@ -341,9 +350,12 @@ def draw_play_ui(screen, font_ui, back_btn,
 
 
 def _draw_popup_panel(screen, font_ui, opt_btns, active_key, anchor_x, panel_bottom):
-    """Draw a row of option buttons in a floating panel above the bottom bar."""
+    """Draw a row of option buttons in a floating panel above the bottom bar.
+
+    Returns the panel's top-y so callers can stack a second panel above it.
+    """
     if not opt_btns:
-        return
+        return panel_bottom
     pad = 8
     btn_h = 34
     # Compute panel width from buttons
@@ -369,6 +381,8 @@ def _draw_popup_panel(screen, font_ui, opt_btns, active_key, anchor_x, panel_bot
             btn["color"] = btn["base_color"]
         draw_button(screen, btn, font_ui)
         bx += btn["rect"].width + pad
+
+    return panel_y
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +419,20 @@ def _brush_bounds(row, col, brush_size):
     end_row = start_row + brush_size - 1
     end_col = start_col + brush_size - 1
     return start_row, end_row, start_col, end_col
+
+
+def _paint_flowers(grid, row, col, ftype, brush, rows, cols, flower_manager):
+    """Paint flowers in a square brush centred on (row, col).
+
+    Skips tiles that are not GRASS or already have flowers.
+    """
+    row0, row1, col0, col1 = _brush_bounds(row, col, brush)
+    for nr in range(row0, row1 + 1):
+        for nc in range(col0, col1 + 1):
+            if (0 <= nr < rows and 0 <= nc < cols
+                    and grid[nr][nc] == GRASS
+                    and not flower_manager.has_flowers(nc, nr)):
+                flower_manager.add(nc, nr, ftype)
 
 
 def _paint_brush(grid, row, col, terrain_type, brush, rows, cols, notify):
@@ -553,6 +581,20 @@ def main():
     spawner_opt_btns = _make_spawner_opt_btns()
     terrain_opt_btns = _make_terrain_opt_btns()
 
+    # Flower sub-panel buttons (sit above the terrain panel when terrain is open)
+    _flower_btn_w = 80
+    flower_opt_btns = [
+        {"label": "White ✿", "key": Flower.WHITE,
+         "base_color": (170, 155, 60), "color": (170, 155, 60),
+         "rect": pygame.Rect(0, 0, _flower_btn_w, 34)},
+        {"label": "Yellow ✿", "key": Flower.YELLOW,
+         "base_color": (170, 145, 30), "color": (170, 145, 30),
+         "rect": pygame.Rect(0, 0, _flower_btn_w, 34)},
+        {"label": "Red ✿",   "key": Flower.RED,
+         "base_color": (160,  55,  55), "color": (160,  55,  55),
+         "rect": pygame.Rect(0, 0, _flower_btn_w, 34)},
+    ]
+
     title_buttons    = [gen_btn, quit_btn]
     map_select_btns  = [island_btn, continent_btn, map_back_btn]
 
@@ -565,6 +607,8 @@ def main():
     terrain_renderer  = None
     grass_spread      = None
     tundra_spread     = None
+    flower_manager    = FlowerManager()
+    flower_mode       = None   # None | Flower.WHITE | Flower.YELLOW | Flower.RED
     current_seed      = random.randint(0, 999_999)
     current_zoom      = TILE_SIZE_DEFAULT
     target_zoom       = TILE_SIZE_DEFAULT
@@ -615,6 +659,9 @@ def main():
             grass_spread.on_tile_changed(row, col)
         if tundra_spread is not None:
             tundra_spread.on_tile_changed(row, col)
+        # Remove flowers from tiles that are no longer grass
+        if grid is not None and grid[row][col] != GRASS:
+            flower_manager.remove_tile(col, row)
 
     def _start_generation(gen_type: str, seed: int):
         nonlocal _gen_thread, _gen_event, _gen_result
@@ -698,7 +745,7 @@ def main():
                         zoom_anchor_sx, zoom_anchor_sy = screen_w / 2.0, screen_h / 2.0
 
                     elif event.key == pygame.K_RIGHTBRACKET and terrain_mode is not None:
-                        terrain_brush = min(10, terrain_brush + 1)
+                        terrain_brush = min(20, terrain_brush + 1)
 
                     elif event.key == pygame.K_LEFTBRACKET and terrain_mode is not None:
                         terrain_brush = max(1, terrain_brush - 1)
@@ -827,6 +874,20 @@ def main():
                                     terrain_mode = None
                                 else:
                                     terrain_mode = opt["key"]
+                                    flower_mode  = None
+                                terrain_open = False
+                                clicked_ui = True
+                                break
+
+                    # Flower sub-panel buttons (shown when terrain panel is open)
+                    if terrain_open and not clicked_ui:
+                        for opt in flower_opt_btns:
+                            if opt["rect"].collidepoint(mouse_pos):
+                                if flower_mode == opt["key"]:
+                                    flower_mode = None
+                                else:
+                                    flower_mode  = opt["key"]
+                                    terrain_mode = None
                                 terrain_open = False
                                 clicked_ui = True
                                 break
@@ -863,6 +924,11 @@ def main():
                                              mark_terrain_changed)
                                 is_painting = True
 
+                        elif flower_mode is not None and in_bounds:
+                            _paint_flowers(grid, row, col, flower_mode,
+                                           terrain_brush, rows, cols, flower_manager)
+                            is_painting = True
+
             if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 if (state == STATE_PLAY and terrain_mode == WALL
                         and wall_drag_start is not None and wall_drag_current is not None):
@@ -875,18 +941,21 @@ def main():
                 is_painting = False
 
             if event.type == pygame.MOUSEMOTION and is_painting and state == STATE_PLAY:
-                if terrain_mode is not None and mouse_pos[1] < screen_h - BOTTOM_BAR_H:
-                    tx, ty  = screen_to_world(mouse_pos[0], mouse_pos[1],
-                                              cam_x, cam_y, current_zoom)
-                    col     = int(tx)
-                    row     = int(ty)
-                    rows    = len(grid)
-                    cols    = len(grid[0]) if rows else 0
+                if mouse_pos[1] < screen_h - BOTTOM_BAR_H:
+                    tx, ty    = screen_to_world(mouse_pos[0], mouse_pos[1],
+                                                cam_x, cam_y, current_zoom)
+                    col       = int(tx)
+                    row       = int(ty)
+                    rows      = len(grid)
+                    cols      = len(grid[0]) if rows else 0
                     in_bounds = 0 <= row < rows and 0 <= col < cols
-                    if in_bounds:
+                    if in_bounds and terrain_mode is not None:
                         _paint_brush(grid, row, col, terrain_mode,
                                      terrain_brush, rows, cols,
                                      mark_terrain_changed)
+                    elif in_bounds and flower_mode is not None:
+                        _paint_flowers(grid, row, col, flower_mode,
+                                       terrain_brush, rows, cols, flower_manager)
             elif (event.type == pygame.MOUSEMOTION and state == STATE_PLAY
                   and terrain_mode == WALL and wall_drag_start is not None):
                 if mouse_pos[1] < screen_h - BOTTOM_BAR_H:
@@ -968,6 +1037,8 @@ def main():
                 wolf_list        = []
                 spawner_mode     = None
                 terrain_mode     = None
+                flower_mode      = None
+                flower_manager   = FlowerManager()
                 wall_drag_start  = None
                 wall_drag_current = None
                 spawner_open     = False
@@ -1000,7 +1071,7 @@ def main():
             else:
                 current_zoom = target_zoom
 
-            speed = max(1.0, CAMERA_SPEED * current_zoom / TILE_SIZE_DEFAULT)
+            speed = CAMERA_SPEED * (TILE_SIZE_DEFAULT / max(current_zoom, TILE_SIZE_MIN)) ** 0.15
             keys  = pygame.key.get_pressed()
             if keys[pygame.K_a]:
                 cam_x -= speed
@@ -1071,6 +1142,7 @@ def main():
         elif state == STATE_PLAY:
             screen.fill(WATER_COLOR)
             terrain_renderer.draw(screen, current_zoom, cam_x, cam_y, screen_w, screen_h)
+            flower_manager.draw_all(screen, cam_x, cam_y, current_zoom, screen_w, screen_h)
             for sheep in sheep_list:
                 sheep.draw(screen, cam_x, cam_y, current_zoom)
             for wolf in wolf_list:
@@ -1118,6 +1190,7 @@ def main():
                 stats_btn=stats_btn, stats_open=stats_open, stats_lines=stats_lines,
                 groups_btn=groups_btn, show_groups=show_groups,
                 cur_map_w=cur_map_w, cur_map_h=cur_map_h,
+                flower_opt_btns=flower_opt_btns, flower_mode=flower_mode,
             )
 
             # Crosshair cursor when a tool is active
