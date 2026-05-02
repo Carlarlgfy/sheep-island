@@ -275,6 +275,10 @@ class Sheep:
         self.wolf_flee_dy     = 0.0
         self._wolf_fear_timer = 0.0
 
+        # Pre-filtered neighbor lists written by ProximityScanner each frame
+        self.nearby_sheep:  list = []
+        self.nearby_wolves: list = []
+
         # Snow exposure — accumulates while on snow; resets when leaving snow
         self.snow_exposure    = 0.0
 
@@ -465,30 +469,33 @@ class Sheep:
         rand_w = 0.25 + self.curiosity * 0.45
 
         # 1. Nearby flock cohesion (same herd) + inter-herd repulsion + corpse avoidance
-        if flock:
+        if self.nearby_sheep:
             cohesion_w = max(0.10, COHESION_WEIGHT - self.curiosity * 0.25)
             same_hx, same_hy, same_count = 0.0, 0.0, 0
             repel_x,  repel_y,  rep_count = 0.0, 0.0, 0
             corpse_rx, corpse_ry, corpse_count = 0.0, 0.0, 0
-            for other in flock:
-                if other is self:
-                    continue
+            for other, _ in self.nearby_sheep:
                 ddx  = other.tx - self.tx
                 ddy  = other.ty - self.ty
-                dist = math.sqrt(ddx * ddx + ddy * ddy)
+                dist_sq = ddx * ddx + ddy * ddy
+                if dist_sq == 0:
+                    continue
                 # Corpse avoidance — steer away from any corpse in range
                 if other.dead_state is not None:
-                    if 0 < dist < CORPSE_AVERSION_RADIUS * 2.5:
+                    if dist_sq < (CORPSE_AVERSION_RADIUS * 2.5) ** 2:
+                        dist = math.sqrt(dist_sq)
                         corpse_rx += (self.tx - other.tx) / dist
                         corpse_ry += (self.ty - other.ty) / dist
                         corpse_count += 1
                     continue
                 same_herd = (self.herd_id != -1 and other.herd_id == self.herd_id)
-                if same_herd and 0 < dist < HERD_COHESION_RADIUS:
+                if same_herd and dist_sq < HERD_COHESION_RADIUS * HERD_COHESION_RADIUS:
+                    dist = math.sqrt(dist_sq)
                     same_hx += (ddx / dist) * SAME_HERD_WEIGHT
                     same_hy += (ddy / dist) * SAME_HERD_WEIGHT
                     same_count += 1
-                elif not same_herd and 0 < dist < INTER_HERD_RADIUS:
+                elif not same_herd and dist_sq < INTER_HERD_RADIUS * INTER_HERD_RADIUS:
+                    dist = math.sqrt(dist_sq)
                     repel_x -= ddx / dist
                     repel_y -= ddy / dist
                     rep_count += 1
@@ -542,11 +549,11 @@ class Sheep:
                 by  += (pdy / pdist) * pw
 
         # 4. Wanderer drift: isolated sheep very slowly attract each other
-        if self.herd_id == -1 and self.curiosity > 0.5 and flock:
+        if self.herd_id == -1 and self.curiosity > 0.5 and self.nearby_sheep:
             nearest_dist = WANDERER_ATTRACT_RADIUS * WANDERER_ATTRACT_RADIUS
             wdx, wdy = 0.0, 0.0
-            for other in flock:
-                if other is self or other.herd_id != -1 or other.dead_state is not None:
+            for other, _ in self.nearby_sheep:
+                if other.herd_id != -1 or other.dead_state is not None:
                     continue
                 ddx = other.tx - self.tx
                 ddy = other.ty - self.ty
@@ -584,9 +591,7 @@ class Sheep:
 
     def _separation_delta(self, flock: list, dt: float):
         sx, sy = 0.0, 0.0
-        for other in flock:
-            if other is self:
-                continue
+        for other, _ in self.nearby_sheep:
             ddx  = self.tx - other.tx
             ddy  = self.ty - other.ty
             dist = math.sqrt(ddx * ddx + ddy * ddy)
@@ -616,8 +621,8 @@ class Sheep:
         return sx, sy
 
     def _try_follow(self, flock: list) -> bool:
-        for other in flock:
-            if other is self or other.dead_state is not None or other.state != Sheep.WALK:
+        for other, _ in self.nearby_sheep:
+            if other.dead_state is not None or other.state != Sheep.WALK:
                 continue
             ddx  = other.tx - self.tx
             ddy  = other.ty - self.ty
@@ -758,8 +763,8 @@ class Sheep:
         best_dx, best_dy = 0.0, 0.0
         found = False
 
-        for other in flock:
-            if other is self or other.dead_state is not None or not other.is_adult or other.infertile or other.pregnant:
+        for other, _ in self.nearby_sheep:
+            if other.dead_state is not None or not other.is_adult or other.infertile or other.pregnant:
                 continue
             # Require opposite sex (same sex = no pairing; unknown sex defaults to "female")
             if getattr(other, 'sex', 'female') == self.sex:
@@ -796,8 +801,8 @@ class Sheep:
 
         best_score = float("inf")
         best = None
-        for other in flock:
-            if other is self or other.dead_state is not None or not other.is_adult:
+        for other, _ in self.nearby_sheep:
+            if other.dead_state is not None or not other.is_adult:
                 continue
             if getattr(other, "sex", "female") != "male":
                 continue
@@ -824,8 +829,8 @@ class Sheep:
             return
         if self.infertile or self.pregnant:
             return
-        for other in flock:
-            if other is self or other.dead_state is not None or not other.is_adult or other.infertile or other.pregnant:
+        for other, _ in self.nearby_sheep:
+            if other.dead_state is not None or not other.is_adult or other.infertile or other.pregnant:
                 continue
             # Require opposite sex
             if getattr(other, 'sex', 'female') == self.sex:

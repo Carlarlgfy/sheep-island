@@ -16,6 +16,7 @@ from flower import Flower, FlowerManager
 from herd import HerdManager
 from wolf import Wolf
 from wolf_pack import WolfPackManager
+from scanning import ProximityScanner
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -634,6 +635,7 @@ def main():
     day_number        = 1
     herd_manager      = HerdManager()
     wolf_pack_manager = WolfPackManager()
+    proximity_scanner = ProximityScanner()
     _group_overlay    = [None]
 
     # Loading screen state
@@ -1050,6 +1052,7 @@ def main():
                 day_number       = 1
                 herd_manager     = HerdManager()
                 wolf_pack_manager = WolfPackManager()
+                proximity_scanner = ProximityScanner()
                 _gen_event       = None
                 state            = STATE_PLAY
 
@@ -1091,6 +1094,8 @@ def main():
             time_of_day = (time_of_day + dt_sim) % DAY_CYCLE_DURATION
             if time_of_day < prev_time_of_day:
                 day_number += 1
+
+            proximity_scanner.update(sheep_list, wolf_list)
 
             herd_manager.update(dt_sim, sheep_list, grid, wolves=wolf_list)
             Ram.update_fights(dt_sim)

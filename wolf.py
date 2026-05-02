@@ -499,6 +499,10 @@ class Wolf:
         self.death_timer = 0.0
         self.death_facing = "right"
 
+        # Pre-filtered neighbor lists written by ProximityScanner each frame
+        self.nearby_sheep:  list = []
+        self.nearby_wolves: list = []
+
     # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
@@ -572,8 +576,8 @@ class Wolf:
 
     def _separation_delta(self, wolves: list, dt: float) -> tuple:
         sx = sy = 0.0
-        for other in wolves:
-            if other is self or other.dead_state is not None:
+        for other, _ in self.nearby_wolves:
+            if other.dead_state is not None:
                 continue
             ddx  = self.tx - other.tx
             ddy  = self.ty - other.ty
@@ -677,7 +681,7 @@ class Wolf:
         best_target  = None
         best_dist_sq = float('inf')
 
-        for sheep in sheep_list:
+        for sheep, _ in self.nearby_sheep:
             if sheep.dead_state is not None or not sheep.alive:
                 continue
             ddx     = sheep.tx - self.tx
@@ -713,7 +717,7 @@ class Wolf:
         best_dist_sq = float('inf')
         best_corpse  = None
 
-        for sheep in sheep_list:
+        for sheep, _ in self.nearby_sheep:
             if sheep.dead_state != "fresh":
                 continue
             if id(sheep) == self.pack_blocked_corpse_id:
@@ -797,7 +801,7 @@ class Wolf:
     def _scare_nearby_sheep(self, sheep_list: list):
         """Set wolf_aware on sheep within WOLF_SCARE_RADIUS."""
         scare_sq = WOLF_SCARE_RADIUS ** 2
-        for sheep in sheep_list:
+        for sheep, _ in self.nearby_sheep:
             if sheep.dead_state is not None or not sheep.alive:
                 continue
             ddx     = sheep.tx - self.tx
@@ -975,16 +979,13 @@ class Wolf:
         play_sq = WOLF_PLAY_RADIUS ** 2
         best    = None
         best_d  = float('inf')
-        for w in wolf_list:
-            if (w is self or not w.alive or w.dead_state is not None
+        for w, d in self.nearby_wolves:
+            if (not w.alive or w.dead_state is not None
                     or w.pack_id != self.pack_id or w.pack_id < 0
                     or w.hunger >= WOLF_PLAY_HUNGER_MAX
                     or w.state in (Wolf.HUNT, Wolf.LUNGE, Wolf.EAT, Wolf.FLEE,
                                    Wolf.PLAY_CHASE, Wolf.PLAY_SUBMIT)):
                 continue
-            ddx = w.tx - self.tx
-            ddy = w.ty - self.ty
-            d   = ddx * ddx + ddy * ddy
             if d <= play_sq and d < best_d:
                 best   = w
                 best_d = d
@@ -1013,17 +1014,16 @@ class Wolf:
         best_score = -1e9
 
         if self.sex == "male" and not self.is_beta:
-            for other in wolf_list:
-                if (other is self or not other.alive or other.dead_state is not None
+            for other, dist_sq in self.nearby_wolves:
+                if (not other.alive or other.dead_state is not None
                         or not other.is_adult or other.sex != "female"
                         or other.pregnant):
                     continue
-                ddx = other.tx - self.tx
-                ddy = other.ty - self.ty
-                dist_sq = ddx * ddx + ddy * ddy
                 limit = 18.0 if (self.pack_id >= 0 and other.pack_id == self.pack_id) else 36.0
                 if dist_sq > limit * limit:
                     continue
+                ddx = other.tx - self.tx
+                ddy = other.ty - self.ty
                 dist = math.sqrt(dist_sq)
                 score = 1.4 - dist / max(1.0, limit)
                 if self.mate_bond_id == other.wolf_id:
@@ -1041,17 +1041,16 @@ class Wolf:
             if mate is not None and mate.is_adult and mate.sex == "male" and not mate.is_beta:
                 target = mate
             else:
-                for other in wolf_list:
-                    if (other is self or not other.alive or other.dead_state is not None
+                for other, dist_sq in self.nearby_wolves:
+                    if (not other.alive or other.dead_state is not None
                             or not other.is_adult or other.sex != "male"
                             or other.is_beta):
                         continue
-                    ddx = other.tx - self.tx
-                    ddy = other.ty - self.ty
-                    dist_sq = ddx * ddx + ddy * ddy
                     limit = 18.0 if (self.pack_id >= 0 and other.pack_id == self.pack_id) else 32.0
                     if dist_sq > limit * limit:
                         continue
+                    ddx = other.tx - self.tx
+                    ddy = other.ty - self.ty
                     dist = math.sqrt(dist_sq)
                     score = 1.2 - dist / max(1.0, limit)
                     if self.preferred_mate_id == other.wolf_id:
@@ -1266,8 +1265,8 @@ class Wolf:
         mate_sq = WOLF_MATE_RADIUS ** 2
         best_mate = None
         best_score = -1.0
-        for other in wolf_list:
-            if (other is self or other.dead_state is not None or not other.alive
+        for other, dist_sq in self.nearby_wolves:
+            if (other.dead_state is not None or not other.alive
                     or not other.is_adult or other.sex != "male"
                     or other.reproduce_cooldown > 0
                     or other.hunger >= WOLF_REPRODUCE_HUNGER
@@ -1275,10 +1274,10 @@ class Wolf:
                 continue
             if self.related_to(other):
                 continue
+            if dist_sq > mate_sq:
+                continue
             ddx = other.tx - self.tx
             ddy = other.ty - self.ty
-            if ddx * ddx + ddy * ddy > mate_sq:
-                continue
             score = (1.0 - other.hunger) + (1.0 - abs(other.tx - self.tx) / max(1.0, WOLF_MATE_RADIUS))
             if self.mate_bond_id == other.wolf_id:
                 score += WOLF_MATE_BOND_BONUS

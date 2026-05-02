@@ -642,13 +642,15 @@ class HerdManager:
             nearest_wx, nearest_wy = cx, cy
 
             for a in members:
-                for wx, wy in wolf_positions:
-                    d_sq = (wx - a.tx) ** 2 + (wy - a.ty) ** 2
+                for w, d_sq in getattr(a, 'nearby_wolves', []):
+                    if not w.alive or w.dead_state is not None:
+                        continue
                     if d_sq <= awareness_sq:
                         # This sheep spots a wolf — mark it spooked
                         a.wolf_aware       = True
                         a._wolf_fear_timer = max(getattr(a, '_wolf_fear_timer', 0.0),
                                                  _SCARE_DUR)
+                        wx, wy = w.tx, w.ty
                         dd = math.sqrt(d_sq)
                         if dd > 0.001:
                             a.wolf_flee_dx = (a.tx - wx) / dd
