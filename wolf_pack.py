@@ -19,7 +19,7 @@ import math
 import random
 
 from wolf import WOLF_HUNGER_HUNT
-from mapgen import is_walkable_tile
+from mapgen import is_walkable_tile, GRASS, DIRT, SNOW
 
 # ---------------------------------------------------------------------------
 # Tuning
@@ -37,15 +37,15 @@ PACK_TARGET_RADIUS        = 600.0  # tile radius for pack-level prey (hearing ra
 PACK_SMELL_RADIUS         = 1000.0 # tile radius for pack-level corpse detection
 PACK_FEAST_MIN            = 22.0   # feast window — 15-30s visible feast, then camp
 PACK_FEAST_MAX            = 50.0
-PACK_CHILL_MIN            = 400.0  # ~1.3 days rest (was 2 days)
-PACK_CHILL_MAX            = 800.0  # ~2.7 days rest (was 4 days)
+PACK_CHILL_MIN            = 60.0   # brief rest beat before checking hunger
+PACK_CHILL_MAX            = 150.0  # keeps cycle alive without trapping wolves in rest
 PACK_FEAST_CORPSE_RADIUS  = 50.0   # tile radius — detect fresh kill near pack to enter feast
 PACK_TRAVEL_STEP_MIN      = 60.0
 PACK_TRAVEL_STEP_MAX      = 140.0
 PACK_TRAVEL_RADIUS_MIN    = 40.0
 PACK_TRAVEL_RADIUS_MAX    = 180.0
-PACK_REST_HUNGER_MAX      = 0.24
-PACK_HUNT_TRIGGER_AVG     = 0.42
+PACK_REST_HUNGER_MAX      = 0.20   # wolves start feeling restless above this hunger
+PACK_HUNT_TRIGGER_AVG     = 0.30   # trigger group hunt at moderate hunger
 PACK_SOLO_RANK_FRAC       = 0.60
 PACK_SOLO_HUNGER_TRIGGER  = 0.58
 PACK_SOLO_REPUTATION_MAX  = 0.38
@@ -86,8 +86,8 @@ PACK_TERRITORY_HEAT_MEMBER = 1.1
 PACK_TERRITORY_HEAT_HUNT   = 2.2
 PACK_TERRITORY_GROW_LIMIT  = 6
 PACK_TERRITORY_PRUNE_HEAT  = 0.45
-PACK_HOME_BASE_RADIUS      = 26.0
-PACK_HOME_PER_WOLF         = 2.8
+PACK_HOME_BASE_RADIUS      = 10.0  # ~15x15 tile comfort zone (radius ~7-8 tiles)
+PACK_HOME_PER_WOLF         = 0.6   # modest growth with pack size
 PACK_TERRITORY_SEARCH_STEP = 60.0
 PACK_TERRITORY_REEVAL_MIN  = 75.0
 PACK_TERRITORY_REEVAL_MAX  = 150.0
@@ -180,6 +180,7 @@ class WolfPackManager:
     def __init__(self):
         self._timer  = 0.0
         self._packs: dict[int, _PackData] = {}
+        self._grid: list | None = None
 
     # ------------------------------------------------------------------
     # Public
@@ -187,6 +188,7 @@ class WolfPackManager:
 
     def update(self, dt: float, wolves: list, sheep_list: list, grid: list | None = None):
         """Call once per frame from main.py."""
+        self._grid = grid
         living = [w for w in wolves
                   if w.alive and w.dead_state is None]
 
@@ -468,8 +470,9 @@ class WolfPackManager:
             if data.territory_cx == 0.0 and data.territory_cy == 0.0:
                 data.territory_cx = data.cx
                 data.territory_cy = data.cy
-                data.home_x = data.cx
-                data.home_y = data.cy
+                hx, hy = self._find_grass_dirt_home(data.cx, data.cy)
+                data.home_x = hx
+                data.home_y = hy
 
             # Validate shared hunt target
             ht = data.hunt_target
@@ -510,8 +513,9 @@ class WolfPackManager:
                 if data.mode != _PackData.FEAST or data.meal_corpse_id != feeding_corpse_id:
                     data.feast_timer = random.uniform(PACK_FEAST_MIN, PACK_FEAST_MAX)
                     data.meal_corpse_id = feeding_corpse_id
-                    data.camp_x = alpha.tx
-                    data.camp_y = alpha.ty
+                    # camp destination is home — wolves return there after eating
+                    data.camp_x = data.home_x if data.home_x != 0.0 else data.cx
+                    data.camp_y = data.home_y if data.home_y != 0.0 else data.cy
                 else:
                     data.feast_timer = max(0.0, data.feast_timer - dt)
                 if data.feast_timer > 0.0:
@@ -522,6 +526,8 @@ class WolfPackManager:
                     data.hunt_target = None
                     data.camp_timer = random.uniform(PACK_CHILL_MIN, PACK_CHILL_MAX)
                     data.blocked_corpse_id = data.meal_corpse_id
+                    data.camp_x = data.home_x if data.home_x != 0.0 else data.cx
+                    data.camp_y = data.home_y if data.home_y != 0.0 else data.cy
             elif data.mode == _PackData.HUNT and any_fresh_kill:
                 # A fresh kill is nearby — enter feast so pack wolves can converge and eat.
                 # This breaks the deadlock where feast requires eating but eating requires feast.
@@ -536,6 +542,8 @@ class WolfPackManager:
                 data.camp_timer = random.uniform(PACK_CHILL_MIN, PACK_CHILL_MAX)
                 data.blocked_corpse_id = data.meal_corpse_id
                 data.hunt_target = None
+                data.camp_x = data.home_x if data.home_x != 0.0 else data.cx
+                data.camp_y = data.home_y if data.home_y != 0.0 else data.cy
             elif data.chill_timer > 0.0 and not any_desperate:
                 data.mode = _PackData.CHILL
                 data.chill_timer = max(0.0, data.chill_timer - dt)
@@ -758,6 +766,8 @@ class WolfPackManager:
             if len(adults) >= PACK_INSTABILITY_SIZE:
                 self._apply_split_pressure(adults)
 
+            self._apply_large_pack_exodus(adults, data)
+
     def _resolve_male_conflict(self, a, b):
         if self._dominance_score(a) >= self._dominance_score(b):
             winner, loser = a, b
@@ -774,9 +784,9 @@ class WolfPackManager:
             loser.solo_excursion = False
             loser.pack_id = -1
             loser.mate_bond_id = None if loser.mate_bond_id == winner.wolf_id else loser.mate_bond_id
-            angle = random.uniform(0, 2 * math.pi)
-            loser.tx += math.cos(angle) * 8.0
-            loser.ty += math.sin(angle) * 8.0
+            edx, edy = self._best_exile_direction(loser)
+            loser.tx += edx * 8.0
+            loser.ty += edy * 8.0
             loser.state = "walk"
         else:
             loser.beta_timer = random.uniform(900.0, 1200.0)
@@ -853,9 +863,9 @@ class WolfPackManager:
             loser.wary_of_wolf_ids.add(aggressor.wolf_id)
         if loser.mate_bond_id in {a.wolf_id for a in aggressors}:
             loser.mate_bond_id = None
-        angle = random.uniform(0, 2 * math.pi)
-        loser.tx += math.cos(angle) * 12.0
-        loser.ty += math.sin(angle) * 12.0
+        edx, edy = self._best_exile_direction(loser)
+        loser.tx += edx * 12.0
+        loser.ty += edy * 12.0
         loser.state = "flee"
         loser._flee_timer = 45.0
         if aggressors:
@@ -863,6 +873,70 @@ class WolfPackManager:
             center_y = sum(a.ty for a in aggressors) / len(aggressors)
             loser._flee_cx = center_x
             loser._flee_cy = center_y
+
+    def _find_grass_dirt_home(self, cx: float, cy: float) -> tuple[float, float]:
+        """Return the nearest grass or dirt tile to (cx, cy) for home base placement."""
+        grid = self._grid
+        if not grid:
+            return cx, cy
+        rows = len(grid)
+        cols = len(grid[0]) if rows else 0
+        GOOD = {GRASS, DIRT}
+        r0, c0 = int(cy), int(cx)
+        if 0 <= r0 < rows and 0 <= c0 < cols and grid[r0][c0] in GOOD:
+            return cx, cy
+        for radius in range(1, 80):
+            steps = max(8, radius * 4)
+            best_x = best_y = None
+            best_d = float('inf')
+            for i in range(steps):
+                angle = 2 * math.pi * i / steps
+                x = cx + math.cos(angle) * radius
+                y = cy + math.sin(angle) * radius
+                r, c = int(y), int(x)
+                if 0 <= r < rows and 0 <= c < cols and grid[r][c] in GOOD:
+                    d = math.hypot(x - cx, y - cy)
+                    if d < best_d:
+                        best_d, best_x, best_y = d, x, y
+            if best_x is not None:
+                return best_x, best_y
+        return cx, cy
+
+    def _best_exile_direction(self, wolf) -> tuple[float, float]:
+        """Return the 8-direction with the most grass/dirt in a 15-tile forward scan."""
+        dirs = [
+            (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0),
+            (0.707, 0.707), (0.707, -0.707), (-0.707, 0.707), (-0.707, -0.707),
+        ]
+        grid = self._grid
+        if not grid:
+            return random.choice(dirs)
+        rows = len(grid)
+        cols = len(grid[0]) if rows else 0
+        GOOD = {GRASS, DIRT}
+        SCAN = 15
+        best_dir = dirs[0]
+        best_score = -9999
+        for dx, dy in dirs:
+            score = 0
+            for step in range(1, SCAN + 1):
+                x = wolf.tx + dx * step
+                y = wolf.ty + dy * step
+                r, c = int(y), int(x)
+                if not (0 <= r < rows and 0 <= c < cols):
+                    score -= 3
+                    break
+                tile = grid[r][c]
+                if tile in GOOD:
+                    score += 1
+                elif tile == SNOW:
+                    score -= 2
+                else:
+                    score -= 1
+            if score > best_score:
+                best_score = score
+                best_dir = (dx, dy)
+        return best_dir
 
     def _can_share_pack(self, a, b) -> bool:
         if getattr(a, "solo_excursion", False) or getattr(b, "solo_excursion", False):
@@ -1124,8 +1198,9 @@ class WolfPackManager:
         data.territory_conflict_timer = max(0.0, data.territory_conflict_timer - dt)
         desired_home = self._home_radius_for_pack(members)
         if data.home_x == 0.0 and data.home_y == 0.0:
-            data.home_x = data.cx
-            data.home_y = data.cy
+            hx, hy = self._find_grass_dirt_home(data.cx, data.cy)
+            data.home_x = hx
+            data.home_y = hy
         self._ensure_home_cell(data, grid)
 
         # Territory gradually cools unless actively used.
@@ -1207,13 +1282,20 @@ class WolfPackManager:
             data.territory_timer = random.uniform(PACK_TERRITORY_REEVAL_MIN, PACK_TERRITORY_REEVAL_MAX)
 
         data.home_radius = desired_home
-        if data.mode == _PackData.CAMP:
-            data.home_x = data.camp_x
-            data.home_y = data.camp_y
+        # Home drifts very slowly and only onto grass/dirt — it's sticky by design
+        pull = min(1.0, dt * 0.012)
+        new_hx = data.home_x + (data.territory_cx - data.home_x) * pull
+        new_hy = data.home_y + (data.territory_cy - data.home_y) * pull
+        if grid:
+            rows = len(grid)
+            cols = len(grid[0]) if rows else 0
+            r, c = int(new_hy), int(new_hx)
+            if 0 <= r < rows and 0 <= c < cols and grid[r][c] in {GRASS, DIRT}:
+                data.home_x = new_hx
+                data.home_y = new_hy
         else:
-            pull = min(1.0, dt * 0.08)
-            data.home_x += (data.territory_cx - data.home_x) * pull
-            data.home_y += (data.territory_cy - data.home_y) * pull
+            data.home_x = new_hx
+            data.home_y = new_hy
         data.home_cell = self._territory_cell_for_point(data.home_x, data.home_y)
         data.territory_cells.add(data.home_cell)
         data.territory_heat[data.home_cell] = max(data.territory_heat.get(data.home_cell, 0.0),
@@ -1293,35 +1375,64 @@ class WolfPackManager:
 
     def _update_pack_travel(self, dt: float, data: _PackData, members: list):
         data.travel_timer = max(0.0, data.travel_timer - dt)
+
+        # HUNT with a live target — chase it
         if data.mode == _PackData.HUNT and data.hunt_target is not None:
             data.travel_x = data.hunt_target.tx
             data.travel_y = data.hunt_target.ty
             data.travel_timer = PACK_TARGET_SCAN_INTERVAL
             return
-        if data.mode == _PackData.CAMP:
+
+        # REST phases (CHILL and CAMP): always drift back toward home
+        if data.mode in (_PackData.CHILL, _PackData.CAMP):
             data.travel_x = data.home_x
             data.travel_y = data.home_y
-            data.travel_timer = data.camp_timer
+            data.travel_timer = 60.0
             return
 
+        # HUNT without a target — patrol territory looking for prey
         dist_to_goal = math.hypot(data.travel_x - data.cx, data.travel_y - data.cy)
         if data.travel_timer > 0.0 and dist_to_goal > 10.0:
             return
 
         if data.territory_cells:
-            if data.resting:
-                candidate_cells = [
-                    cell for cell in data.territory_cells
-                    if self._territory_cell_distance(cell, data.home_cell) <= 2
-                ] or [data.home_cell]
-            else:
-                candidate_cells = list(data.territory_cells)
+            candidate_cells = list(data.territory_cells)
             chosen = random.choice(candidate_cells)
             data.travel_x, data.travel_y = self._territory_point_for_cell(chosen)
         else:
-            data.travel_x = data.home_x
-            data.travel_y = data.home_y
+            angle = random.uniform(0, 2 * math.pi)
+            search_dist = random.uniform(20.0, PACK_TERRITORY_BASE_RADIUS)
+            data.travel_x = data.home_x + math.cos(angle) * search_dist
+            data.travel_y = data.home_y + math.sin(angle) * search_dist
         data.travel_timer = random.uniform(PACK_TRAVEL_STEP_MIN, PACK_TRAVEL_STEP_MAX)
+
+    def _apply_large_pack_exodus(self, adults: list, data: "_PackData"):
+        """For packs of 10+ adults, occasionally let a bonded lower-rank pair leave voluntarily."""
+        excess = len(adults) - 9
+        if excess <= 0:
+            return
+        if random.random() > 0.00035 * excess:
+            return
+        ranked = sorted(adults, key=self._dominance_score)
+        for wolf in ranked:
+            if wolf.pair_bond_only or wolf.mate_bond_id is None:
+                continue
+            mate = next((w for w in adults if w.wolf_id == wolf.mate_bond_id
+                         and not w.pair_bond_only), None)
+            if mate is None:
+                continue
+            wolf.pair_bond_only = True
+            mate.pair_bond_only = True
+            wolf.pack_id = -1
+            mate.pack_id = -1
+            wolf.was_exiled = False
+            mate.was_exiled = False
+            edx, edy = self._best_exile_direction(wolf)
+            wolf.tx += edx * 6.0
+            wolf.ty += edy * 6.0
+            mate.tx += edx * 6.0
+            mate.ty += edy * 6.0
+            return
 
     def _apply_split_pressure(self, adults: list):
         anchors = sorted(adults, key=self._dominance_score, reverse=True)

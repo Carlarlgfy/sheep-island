@@ -18,7 +18,7 @@ import random
 
 import pygame
 
-from mapgen import WATER, GRASS, SNOW, is_walkable_tile, advance_until_blocked
+from mapgen import WATER, GRASS, DIRT, SNOW, is_walkable_tile, advance_until_blocked
 
 _WOLF_DIR = os.path.join(os.path.dirname(__file__), "fauna", "wolf")
 
@@ -27,7 +27,7 @@ _WOLF_DIR = os.path.join(os.path.dirname(__file__), "fauna", "wolf")
 # ---------------------------------------------------------------------------
 
 # Hunger
-WOLF_HUNGER_RATE          = 0.00028   # slow accumulation — wolves are built for feast/famine
+WOLF_HUNGER_RATE          = 0.00052   # wolves get hungry every ~2 sim-days from full
 WOLF_HUNGER_HUNT          = 0.42      # start actively hunting above this
 WOLF_HUNGER_DESPERATE     = 0.72      # ignore ram risk, push through everything
 WOLF_HUNGER_STARVING      = 0.88      # only starving wolves should return to old corpses
@@ -114,8 +114,8 @@ WOLF_PUP_FEED_MIN_COOLDOWN  = DAY_DURATION    # adult must have ≥1 day of sati
 WOLF_EAT_MAX_SESSION      = DAY_DURATION * 0.09  # ~27 sec max eating — quick but visible
 WOLF_CORPSE_APPROACH_MAX  = 10.0                 # abandon a corpse if slot takes too long to reach
 WOLF_CORPSE_COMMIT_MAX    = DAY_DURATION * 0.13  # ~39 sec total commitment (approach + eating)
-WOLF_MEAL_COOLDOWN_MIN    = DAY_DURATION * 1.5   # 1.5 days before hunting again
-WOLF_MEAL_COOLDOWN_MAX    = DAY_DURATION * 2.5   # 2.5 days max satiation window
+WOLF_MEAL_COOLDOWN_MIN    = DAY_DURATION * 0.7   # 0.7 days before hunting again
+WOLF_MEAL_COOLDOWN_MAX    = DAY_DURATION * 1.3   # 1.3 days max satiation window
 
 # Post-maturity earned growth (battle-hardening / well-fed bulk)
 WOLF_EARN_SIZE_MAX        = 0.30   # max extra size fraction earned through good feeding
@@ -974,6 +974,65 @@ class Wolf:
         push = (1.0 - dist / self.exile_home_radius) * 5.5 * dt
         return (ddx / dist) * push, (ddy / dist) * push
 
+    def _snow_avoidance_delta(self, grid: list, dt: float) -> tuple[float, float]:
+        """Push wolf away from nearby snow tiles."""
+        if not grid:
+            return 0.0, 0.0
+        rows = len(grid)
+        cols = len(grid[0]) if rows else 0
+        sx = sy = 0.0
+        PUSH = 5.0
+        CHECK_R = 5
+        for dr in range(-CHECK_R, CHECK_R + 1, 2):
+            for dc in range(-CHECK_R, CHECK_R + 1, 2):
+                r = int(self.ty) + dr
+                c = int(self.tx) + dc
+                if not (0 <= r < rows and 0 <= c < cols):
+                    continue
+                if grid[r][c] == SNOW:
+                    dist = math.hypot(float(dc), float(dr))
+                    if dist < 0.01:
+                        dist = 0.01
+                    weight = max(0.0, 1.0 - dist / CHECK_R) * PUSH * dt
+                    sx -= (dc / dist) * weight
+                    sy -= (dr / dist) * weight
+        return sx, sy
+
+    def _best_flee_direction(self, grid: list) -> tuple[float, float]:
+        """Pick the 8-direction with the most grass/dirt when flee direction is ambiguous."""
+        dirs = [
+            (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0),
+            (0.707, 0.707), (0.707, -0.707), (-0.707, 0.707), (-0.707, -0.707),
+        ]
+        if not grid:
+            return random.choice(dirs)
+        rows = len(grid)
+        cols = len(grid[0]) if rows else 0
+        GOOD = {GRASS, DIRT}
+        SCAN = 12
+        best_dir = dirs[0]
+        best_score = -9999
+        for dx, dy in dirs:
+            score = 0
+            for step in range(1, SCAN + 1):
+                x = self.tx + dx * step
+                y = self.ty + dy * step
+                r, c = int(y), int(x)
+                if not (0 <= r < rows and 0 <= c < cols):
+                    score -= 3
+                    break
+                tile = grid[r][c]
+                if tile in GOOD:
+                    score += 1
+                elif tile == SNOW:
+                    score -= 2
+                else:
+                    score -= 1
+            if score > best_score:
+                best_score = score
+                best_dir = (dx, dy)
+        return best_dir
+
     def _find_play_partner(self, wolf_list: list):
         """Return a nearby satiated packmate to play with, or None."""
         play_sq = WOLF_PLAY_RADIUS ** 2
@@ -1537,9 +1596,12 @@ class Wolf:
             fx = self.tx - self._flee_cx
             fy = self.ty - self._flee_cy
             fd = math.sqrt(fx * fx + fy * fy)
-            if fd > 0:
+            if fd > 0.5:
                 self.dx = fx / fd
                 self.dy = fy / fd
+            else:
+                # On top of threat or no clear direction — pick the best grass direction
+                self.dx, self.dy = self._best_flee_direction(grid)
             self._refresh_facing()
             sx, sy = self._separation_delta(wolf_list, dt)
             new_tx = self.tx + self.dx * self.move_speed * 1.4 * dt + sx
@@ -2096,6 +2158,7 @@ class Wolf:
             sx, sy = self._separation_delta(wolf_list, dt)
             ax, ay = self._sheep_avoidance_delta(sheep_list, dt)
             hx, hy = self._exile_home_avoidance_delta(dt)
+            wx, wy = self._snow_avoidance_delta(grid, dt)
             px, py = self._pack_cohesion_delta(dt)
             fx, fy = self._pack_alpha_follow_delta(dt)
             gx, gy = self._pack_travel_delta(dt)
@@ -2103,10 +2166,8 @@ class Wolf:
             sx += mx
             sy += my
             qx, qy = self._mate_seek_delta(wolf_list, dt)
-            ax += qx
-            ay += qy
-            ax += hx
-            ay += hy
+            ax += qx + hx + wx
+            ay += qy + hy + wy
             if self.solo_excursion and (self._meal_cooldown > 0.0 or self.hunger < WOLF_HUNGER_HUNT):
                 ddx = self.pack_memory_x - self.tx
                 ddy = self.pack_memory_y - self.ty
