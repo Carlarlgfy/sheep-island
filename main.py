@@ -3,6 +3,8 @@ import sys
 import random
 import math
 import threading
+import json
+from pathlib import Path
 
 from mapgen import (
     MapGenerator, ContinentGenerator, flood_fill_grass,
@@ -33,9 +35,11 @@ ZOOM_FACTOR                 = 1.1
 CAMERA_SPEED                = 28
 
 STATE_TITLE      = "title"
+STATE_START_GAME = "start_game"
 STATE_MAP_SELECT = "map_select"
 STATE_LOADING    = "loading"
 STATE_PLAY       = "play"
+STATE_CHARACTER_CREATOR = "character_creator"
 
 DAY_CYCLE_DURATION = 300.0
 
@@ -43,6 +47,40 @@ BOTTOM_BAR_H = 48
 
 SPEED_SCALES = [0, 1, 3, 8]
 SPEED_LABELS = ["||", ">", ">>", ">>>"]
+
+CHARACTER_SAVE_PATH = Path("characters.json")
+
+CHARACTER_OPTIONS = {
+    "body": ["Slim", "Average", "Broad"],
+    "head": ["Round", "Square", "Long"],
+    "eyes": ["Brown", "Blue", "Green", "Gray"],
+    "hair": ["Short", "Bob", "Long", "Bald"],
+    "hair_color": ["Black", "Brown", "Blond", "Red", "Gray"],
+    "skin": ["Light", "Tan", "Brown", "Dark"],
+    "difficulty": ["Easy", "Medium", "Hard"],
+}
+
+SKIN_COLORS = {
+    "Light": (232, 188, 145),
+    "Tan": (196, 134, 84),
+    "Brown": (132, 82, 52),
+    "Dark": (82, 50, 35),
+}
+
+HAIR_COLORS = {
+    "Black": (24, 22, 20),
+    "Brown": (76, 48, 28),
+    "Blond": (206, 168, 70),
+    "Red": (150, 64, 38),
+    "Gray": (120, 120, 112),
+}
+
+EYE_COLORS = {
+    "Brown": (70, 42, 24),
+    "Blue": (54, 112, 170),
+    "Green": (56, 124, 70),
+    "Gray": (118, 128, 132),
+}
 
 # Spawner mode keys
 SPAWN_FEMALE_SHEEP = "female_sheep"
@@ -95,7 +133,7 @@ def draw_title(screen, font_title, font_ui, buttons, screen_w, screen_h):
 
 
 def draw_map_select(screen, font_title, font_ui, buttons, screen_w, screen_h):
-    """Map type selection screen shown after clicking 'Generate Map'."""
+    """Map type selection screen shown after choosing sandbox simulation."""
     screen.fill((18, 18, 36))
     title_surf = font_title.render("Select Map Type", True, (240, 215, 90))
     screen.blit(title_surf, title_surf.get_rect(center=(screen_w // 2, screen_h // 4)))
@@ -117,6 +155,16 @@ def draw_map_select(screen, font_title, font_ui, buttons, screen_w, screen_h):
         draw_button(screen, btn, font_ui)
 
 
+def draw_start_game(screen, font_title, font_ui, buttons, screen_w, screen_h):
+    screen.fill((18, 18, 36))
+    title_surf = font_title.render("Start Game", True, (240, 215, 90))
+    screen.blit(title_surf, title_surf.get_rect(center=(screen_w // 2, screen_h // 4)))
+    sub = font_ui.render("campaign and saves are placeholders for now", True, (140, 140, 180))
+    screen.blit(sub, sub.get_rect(center=(screen_w // 2, screen_h // 4 + 56)))
+    for btn in buttons:
+        draw_button(screen, btn, font_ui)
+
+
 def draw_loading(screen, font_title, font_ui, dot_count, sheep_surf,
                  sheep_px, sheep_py, screen_w, screen_h, gen_type="island"):
     screen.fill((18, 18, 36))
@@ -129,6 +177,182 @@ def draw_loading(screen, font_title, font_ui, dot_count, sheep_surf,
     if sheep_surf is not None:
         w, h = sheep_surf.get_size()
         screen.blit(sheep_surf, (int(sheep_px) - w // 2, int(sheep_py) - h // 2))
+
+
+def load_character_library():
+    try:
+        with CHARACTER_SAVE_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [c for c in data if isinstance(c, dict)]
+
+
+def save_character_library(characters):
+    with CHARACTER_SAVE_PATH.open("w", encoding="utf-8") as f:
+        json.dump(characters, f, indent=2)
+
+
+def make_blank_character():
+    return {
+        "name": "New Human",
+        "body": "Average",
+        "head": "Round",
+        "eyes": "Brown",
+        "hair": "Short",
+        "hair_color": "Brown",
+        "skin": "Tan",
+        "difficulty": "Easy",
+    }
+
+
+def cycle_character_option(character, key, direction):
+    options = CHARACTER_OPTIONS[key]
+    cur = character.get(key, options[0])
+    idx = options.index(cur) if cur in options else 0
+    character[key] = options[(idx + direction) % len(options)]
+
+
+def draw_character_preview(screen, character, area_rect):
+    pygame.draw.rect(screen, (26, 30, 36), area_rect, border_radius=8)
+    pygame.draw.rect(screen, (88, 98, 112), area_rect, width=2, border_radius=8)
+
+    cx = area_rect.centerx
+    base_y = area_rect.bottom - 80
+    skin = SKIN_COLORS.get(character.get("skin"), SKIN_COLORS["Tan"])
+    hair_col = HAIR_COLORS.get(character.get("hair_color"), HAIR_COLORS["Brown"])
+    eye_col = EYE_COLORS.get(character.get("eyes"), EYE_COLORS["Brown"])
+
+    body = character.get("body", "Average")
+    if body == "Slim":
+        torso_w, torso_h = 72, 155
+    elif body == "Broad":
+        torso_w, torso_h = 112, 150
+    else:
+        torso_w, torso_h = 92, 152
+
+    torso = pygame.Rect(0, 0, torso_w, torso_h)
+    torso.midbottom = (cx, base_y)
+    pygame.draw.rect(screen, (73, 88, 106), torso, border_radius=16)
+    pygame.draw.rect(screen, (47, 56, 68), torso, width=3, border_radius=16)
+    pygame.draw.line(screen, (42, 49, 58), (cx, torso.top + 18), (cx, torso.bottom - 8), 2)
+
+    leg_w = max(24, torso_w // 3)
+    left_leg = pygame.Rect(cx - leg_w - 6, torso.bottom - 3, leg_w, 62)
+    right_leg = pygame.Rect(cx + 6, torso.bottom - 3, leg_w, 62)
+    for leg in (left_leg, right_leg):
+        pygame.draw.rect(screen, (47, 57, 70), leg, border_radius=8)
+
+    arm_w = 22
+    left_arm = pygame.Rect(torso.left - arm_w + 6, torso.top + 18, arm_w, 112)
+    right_arm = pygame.Rect(torso.right - 6, torso.top + 18, arm_w, 112)
+    for arm in (left_arm, right_arm):
+        pygame.draw.rect(screen, skin, arm, border_radius=10)
+        pygame.draw.rect(screen, (55, 46, 42), arm, width=2, border_radius=10)
+
+    head = character.get("head", "Round")
+    if head == "Square":
+        head_rect = pygame.Rect(0, 0, 84, 78)
+        head_rect.midbottom = (cx, torso.top + 10)
+        pygame.draw.rect(screen, skin, head_rect, border_radius=18)
+        face_rect = head_rect
+    elif head == "Long":
+        face_rect = pygame.Rect(0, 0, 74, 96)
+        face_rect.midbottom = (cx, torso.top + 10)
+        pygame.draw.ellipse(screen, skin, face_rect)
+    else:
+        face_rect = pygame.Rect(0, 0, 84, 84)
+        face_rect.midbottom = (cx, torso.top + 10)
+        pygame.draw.ellipse(screen, skin, face_rect)
+    pygame.draw.ellipse(screen, (58, 47, 42), face_rect, width=2)
+
+    hair = character.get("hair", "Short")
+    if hair != "Bald":
+        if hair == "Bob":
+            hair_rect = face_rect.inflate(12, 8)
+            hair_rect.y -= 10
+            pygame.draw.ellipse(screen, hair_col, hair_rect)
+            pygame.draw.rect(screen, hair_col, (hair_rect.left, hair_rect.centery, hair_rect.width, hair_rect.height // 2))
+        elif hair == "Long":
+            hair_rect = face_rect.inflate(18, 36)
+            hair_rect.y -= 16
+            pygame.draw.ellipse(screen, hair_col, hair_rect)
+            pygame.draw.rect(screen, hair_col, (hair_rect.left + 4, hair_rect.centery - 4, hair_rect.width - 8, hair_rect.height // 2), border_radius=12)
+        else:
+            hair_rect = face_rect.inflate(8, 6)
+            hair_rect.y -= 12
+            pygame.draw.ellipse(screen, hair_col, hair_rect)
+        if head == "Square":
+            pygame.draw.rect(screen, skin, face_rect, border_radius=18)
+        else:
+            pygame.draw.ellipse(screen, skin, face_rect)
+        pygame.draw.ellipse(screen, (58, 47, 42), face_rect, width=2)
+        pygame.draw.arc(screen, hair_col, face_rect.inflate(8, 4), math.pi, 2 * math.pi, 12)
+
+    eye_y = face_rect.centery - 4
+    for ex in (cx - 18, cx + 18):
+        pygame.draw.ellipse(screen, (236, 232, 220), (ex - 8, eye_y - 5, 16, 10))
+        pygame.draw.circle(screen, eye_col, (ex, eye_y), 4)
+        pygame.draw.circle(screen, (16, 16, 16), (ex, eye_y), 2)
+    pygame.draw.line(screen, (82, 52, 42), (cx - 10, eye_y + 24), (cx + 10, eye_y + 24), 2)
+
+
+def draw_character_creator(screen, font_title, font_ui, character, characters,
+                           option_buttons, creator_buttons, selected_tab,
+                           name_active, screen_w, screen_h):
+    screen.fill((17, 20, 25))
+    title = font_title.render("Character Creator", True, (232, 214, 154))
+    screen.blit(title, (36, 24))
+
+    for key in ("tab_creator", "tab_library"):
+        btn = creator_buttons[key]
+        btn["color"] = (88, 118, 132) if selected_tab == key else (58, 64, 74)
+        draw_button(screen, btn, font_ui)
+
+    draw_button(screen, creator_buttons["back"], font_ui)
+
+    panel = pygame.Rect(32, 132, 365, screen_h - 170)
+    pygame.draw.rect(screen, (29, 34, 40), panel, border_radius=8)
+    pygame.draw.rect(screen, (84, 91, 100), panel, width=2, border_radius=8)
+
+    if selected_tab == "tab_creator":
+        name_rect = creator_buttons["name"]
+        pygame.draw.rect(screen, (42, 48, 56), name_rect, border_radius=6)
+        pygame.draw.rect(screen, (190, 170, 92) if name_active else (91, 100, 110),
+                         name_rect, width=2, border_radius=6)
+        name_surf = font_ui.render(character["name"], True, (232, 235, 230))
+        screen.blit(name_surf, (name_rect.x + 12, name_rect.y + 9))
+
+        for label, left_btn, right_btn, value_rect, key in option_buttons:
+            label_surf = font_ui.render(label, True, (176, 184, 188))
+            screen.blit(label_surf, (value_rect.x, value_rect.y - 24))
+            pygame.draw.rect(screen, (37, 43, 50), value_rect, border_radius=6)
+            value = font_ui.render(character[key], True, (235, 236, 226))
+            screen.blit(value, value.get_rect(center=value_rect.center))
+            draw_button(screen, left_btn, font_ui)
+            draw_button(screen, right_btn, font_ui)
+
+        draw_button(screen, creator_buttons["new"], font_ui)
+        draw_button(screen, creator_buttons["save"], font_ui)
+    else:
+        if not characters:
+            empty = font_ui.render("No saved characters yet.", True, (176, 184, 188))
+            screen.blit(empty, (panel.x + 18, panel.y + 24))
+        for i, saved in enumerate(characters[-12:]):
+            row = pygame.Rect(panel.x + 14, panel.y + 18 + i * 44, panel.width - 28, 36)
+            pygame.draw.rect(screen, (40, 47, 54), row, border_radius=6)
+            name = str(saved.get("name", "Unnamed"))
+            diff = str(saved.get("difficulty", "Easy"))
+            screen.blit(font_ui.render(name, True, (232, 235, 230)), (row.x + 10, row.y + 8))
+            diff_surf = font_ui.render(diff, True, (190, 176, 108))
+            screen.blit(diff_surf, diff_surf.get_rect(midright=(row.right - 10, row.centery)))
+
+    preview_rect = pygame.Rect(430, 132, screen_w - 468, screen_h - 170)
+    draw_character_preview(screen, character, preview_rect)
+    caption = font_ui.render("Layered placeholder art: body, head, eyes, hair, skin tone", True, (154, 164, 168))
+    screen.blit(caption, (preview_rect.x + 18, preview_rect.y + 18))
 
 
 # ---------------------------------------------------------------------------
@@ -470,17 +694,28 @@ def _paint_line(grid, start_row, start_col, end_row, end_col, terrain_type, noti
 # ---------------------------------------------------------------------------
 
 def update_button_layout(
-        gen_btn, quit_btn,
+        start_btn, character_creator_btn, options_btn, quit_btn,
+        campaign_btn, sandbox_btn, load_btn, start_back_btn,
         island_btn, continent_btn, map_back_btn,
         back_btn, spawner_btn, terrain_btn,
         stats_btn, groups_btn, speed_btns,
-        screen_w, screen_h):
+        screen_w, screen_h,
+        creator_buttons=None, option_buttons=None):
 
     # --- Title screen ---
     bw, bh = 260, 58
     bx = screen_w // 2 - bw // 2
-    gen_btn["rect"]  = pygame.Rect(bx, screen_h // 2 + 20,  bw, bh)
-    quit_btn["rect"] = pygame.Rect(bx, screen_h // 2 + 100, bw, bh)
+    start_y = screen_h // 2 - 20
+    start_btn["rect"] = pygame.Rect(bx, start_y, bw, bh)
+    character_creator_btn["rect"] = pygame.Rect(bx, start_y + 74, bw, bh)
+    options_btn["rect"] = pygame.Rect(bx, start_y + 148, bw, bh)
+    quit_btn["rect"] = pygame.Rect(bx, start_y + 222, bw, bh)
+
+    # --- Start game screen ---
+    campaign_btn["rect"] = pygame.Rect(bx, screen_h // 2 - 35, bw, bh)
+    sandbox_btn["rect"] = pygame.Rect(bx, screen_h // 2 + 39, bw, bh)
+    load_btn["rect"] = pygame.Rect(bx, screen_h // 2 + 113, bw, bh)
+    start_back_btn["rect"] = pygame.Rect(bx, screen_h // 2 + 187, bw, bh)
 
     # --- Map select screen ---
     mbw, mbh = 260, 58
@@ -509,6 +744,34 @@ def update_button_layout(
     sy = 10
     for i, btn in enumerate(speed_btns):
         btn["rect"] = pygame.Rect(sx + i * (sbw + sgap), sy, sbw, sbh)
+
+    # --- Character creator ---
+    if creator_buttons is not None:
+        creator_buttons["tab_creator"]["rect"] = pygame.Rect(36, 92, 120, 34)
+        creator_buttons["tab_library"]["rect"] = pygame.Rect(164, 92, 120, 34)
+        creator_buttons["back"]["rect"] = pygame.Rect(screen_w - 178, 28, 146, 38)
+        creator_buttons["name"]["rect"] = pygame.Rect(52, 158, 315, 40)
+        creator_buttons["new"]["rect"] = pygame.Rect(52, screen_h - 82, 130, 38)
+        creator_buttons["save"]["rect"] = pygame.Rect(196, screen_h - 82, 170, 38)
+
+    if option_buttons is not None:
+        labels = [
+            ("Body Type", "body"),
+            ("Head Shape", "head"),
+            ("Eye Color", "eyes"),
+            ("Hair Style", "hair"),
+            ("Hair Color", "hair_color"),
+            ("Skin Tone", "skin"),
+            ("Level Difficulty", "difficulty"),
+        ]
+        option_buttons.clear()
+        y = 230
+        for label, key in labels:
+            value_rect = pygame.Rect(96, y, 224, 34)
+            left_btn = {"label": "<", "rect": pygame.Rect(52, y, 36, 34), "color": (66, 76, 86), "key": key, "dir": -1}
+            right_btn = {"label": ">", "rect": pygame.Rect(328, y, 36, 34), "color": (66, 76, 86), "key": key, "dir": 1}
+            option_buttons.append((label, left_btn, right_btn, value_rect, key))
+            y += 66
 
 
 def _make_spawner_opt_btns():
@@ -564,8 +827,15 @@ def main():
     font_ui    = pygame.font.SysFont("Arial", 20)
 
     # --- Button dicts ---
-    gen_btn       = {"label": "Generate Map",      "rect": pygame.Rect(0,0,0,0), "color": (55, 130, 55)}
+    start_btn     = {"label": "Start Game",        "rect": pygame.Rect(0,0,0,0), "color": (55, 130, 55)}
+    character_creator_btn = {"label": "Character Creator", "rect": pygame.Rect(0,0,0,0), "color": (65, 105, 135)}
+    options_btn   = {"label": "Options",           "rect": pygame.Rect(0,0,0,0), "color": (90, 90, 110)}
     quit_btn      = {"label": "Quit",              "rect": pygame.Rect(0,0,0,0), "color": (150, 55, 55)}
+
+    campaign_btn  = {"label": "Start Campaign",    "rect": pygame.Rect(0,0,0,0), "color": (55, 130, 55)}
+    sandbox_btn   = {"label": "Sandbox Sim",       "rect": pygame.Rect(0,0,0,0), "color": (50, 105, 155)}
+    load_btn      = {"label": "Load Game",         "rect": pygame.Rect(0,0,0,0), "color": (90, 90, 110)}
+    start_back_btn = {"label": "Back to Menu",     "rect": pygame.Rect(0,0,0,0), "color": (80, 80, 80)}
 
     island_btn    = {"label": "Generate Island",   "rect": pygame.Rect(0,0,0,0), "color": (45, 120, 45)}
     continent_btn = {"label": "Generate Continent","rect": pygame.Rect(0,0,0,0), "color": (40, 90, 160)}
@@ -596,13 +866,28 @@ def main():
          "rect": pygame.Rect(0, 0, _flower_btn_w, 34)},
     ]
 
-    title_buttons    = [gen_btn, quit_btn]
+    creator_buttons = {
+        "tab_creator": {"label": "Creator", "rect": pygame.Rect(0,0,0,0), "color": (58, 64, 74)},
+        "tab_library": {"label": "Library", "rect": pygame.Rect(0,0,0,0), "color": (58, 64, 74)},
+        "back": {"label": "Back to Menu", "rect": pygame.Rect(0,0,0,0), "color": (70, 70, 110)},
+        "name": {"label": "", "rect": pygame.Rect(0,0,0,0), "color": (42, 48, 56)},
+        "new": {"label": "New", "rect": pygame.Rect(0,0,0,0), "color": (82, 88, 96)},
+        "save": {"label": "Save Character", "rect": pygame.Rect(0,0,0,0), "color": (58, 126, 82)},
+    }
+    character_option_buttons = []
+
+    title_buttons    = [start_btn, character_creator_btn, options_btn, quit_btn]
+    start_game_btns  = [campaign_btn, sandbox_btn, load_btn, start_back_btn]
     map_select_btns  = [island_btn, continent_btn, map_back_btn]
 
     sim_speed_idx = 1
 
     # --- Game state ---
     state             = STATE_TITLE
+    selected_creator_tab = "tab_creator"
+    name_input_active = False
+    character_library = load_character_library()
+    current_character = make_blank_character()
     _gen_type         = "island"   # "island" or "continent"
     grid              = None
     terrain_renderer  = None
@@ -711,11 +996,14 @@ def main():
         mouse_pos           = pygame.mouse.get_pos()
 
         update_button_layout(
-            gen_btn, quit_btn,
+            start_btn, character_creator_btn, options_btn, quit_btn,
+            campaign_btn, sandbox_btn, load_btn, start_back_btn,
             island_btn, continent_btn, map_back_btn,
             back_btn, spawner_btn, terrain_btn,
             stats_btn, groups_btn, speed_btns,
-            screen_w, screen_h)
+            screen_w, screen_h,
+            creator_buttons=creator_buttons,
+            option_buttons=character_option_buttons)
 
         # --- Events ---
         for event in pygame.event.get():
@@ -766,6 +1054,19 @@ def main():
                         stats_open   = False
                         show_groups  = False
 
+                elif state == STATE_CHARACTER_CREATOR:
+                    if event.key == pygame.K_ESCAPE:
+                        name_input_active = False
+                        state = STATE_TITLE
+                    elif name_input_active:
+                        if event.key == pygame.K_BACKSPACE:
+                            current_character["name"] = current_character["name"][:-1]
+                        elif event.key == pygame.K_RETURN:
+                            name_input_active = False
+                        elif event.unicode and len(current_character["name"]) < 24:
+                            if event.unicode.isprintable():
+                                current_character["name"] += event.unicode
+
             if event.type == pygame.MOUSEWHEEL and state == STATE_PLAY:
                 if event.y > 0:
                     target_zoom = min(TILE_SIZE_MAX, target_zoom * ZOOM_FACTOR)
@@ -777,12 +1078,33 @@ def main():
 
                 # ---- Title screen ----
                 if state == STATE_TITLE:
-                    if gen_btn["rect"].collidepoint(mouse_pos):
-                        state = STATE_MAP_SELECT
+                    if start_btn["rect"].collidepoint(mouse_pos):
+                        state = STATE_START_GAME
+
+                    elif character_creator_btn["rect"].collidepoint(mouse_pos):
+                        selected_creator_tab = "tab_creator"
+                        state = STATE_CHARACTER_CREATOR
+
+                    elif options_btn["rect"].collidepoint(mouse_pos):
+                        pass
 
                     elif quit_btn["rect"].collidepoint(mouse_pos):
                         pygame.quit()
                         sys.exit()
+
+                # ---- Start game screen ----
+                elif state == STATE_START_GAME:
+                    if campaign_btn["rect"].collidepoint(mouse_pos):
+                        pass
+
+                    elif sandbox_btn["rect"].collidepoint(mouse_pos):
+                        state = STATE_MAP_SELECT
+
+                    elif load_btn["rect"].collidepoint(mouse_pos):
+                        pass
+
+                    elif start_back_btn["rect"].collidepoint(mouse_pos):
+                        state = STATE_TITLE
 
                 # ---- Map select screen ----
                 elif state == STATE_MAP_SELECT:
@@ -799,7 +1121,40 @@ def main():
                         state = STATE_LOADING
 
                     elif map_back_btn["rect"].collidepoint(mouse_pos):
+                        state = STATE_START_GAME
+
+                # ---- Character creator screen ----
+                elif state == STATE_CHARACTER_CREATOR:
+                    if creator_buttons["back"]["rect"].collidepoint(mouse_pos):
+                        name_input_active = False
                         state = STATE_TITLE
+                    elif creator_buttons["tab_creator"]["rect"].collidepoint(mouse_pos):
+                        selected_creator_tab = "tab_creator"
+                    elif creator_buttons["tab_library"]["rect"].collidepoint(mouse_pos):
+                        selected_creator_tab = "tab_library"
+                    elif selected_creator_tab == "tab_creator":
+                        if creator_buttons["name"]["rect"].collidepoint(mouse_pos):
+                            name_input_active = True
+                        elif creator_buttons["new"]["rect"].collidepoint(mouse_pos):
+                            current_character = make_blank_character()
+                            name_input_active = False
+                        elif creator_buttons["save"]["rect"].collidepoint(mouse_pos):
+                            saved = dict(current_character)
+                            if not saved["name"].strip():
+                                saved["name"] = f"Human {len(character_library) + 1}"
+                            character_library.append(saved)
+                            save_character_library(character_library)
+                            selected_creator_tab = "tab_library"
+                            name_input_active = False
+                        else:
+                            name_input_active = False
+                            for _label, left_btn, right_btn, _value_rect, key in character_option_buttons:
+                                if left_btn["rect"].collidepoint(mouse_pos):
+                                    cycle_character_option(current_character, key, -1)
+                                    break
+                                if right_btn["rect"].collidepoint(mouse_pos):
+                                    cycle_character_option(current_character, key, 1)
+                                    break
 
                 # ---- Play screen ----
                 elif state == STATE_PLAY:
@@ -1134,9 +1489,20 @@ def main():
         if state == STATE_TITLE:
             draw_title(screen, font_title, font_ui, title_buttons, screen_w, screen_h)
 
+        elif state == STATE_START_GAME:
+            draw_start_game(screen, font_title, font_ui, start_game_btns,
+                            screen_w, screen_h)
+
         elif state == STATE_MAP_SELECT:
             draw_map_select(screen, font_title, font_ui, map_select_btns,
                             screen_w, screen_h)
+
+        elif state == STATE_CHARACTER_CREATOR:
+            draw_character_creator(
+                screen, font_title, font_ui, current_character, character_library,
+                character_option_buttons, creator_buttons, selected_creator_tab,
+                name_input_active, screen_w, screen_h,
+            )
 
         elif state == STATE_LOADING:
             draw_loading(screen, font_title, font_ui,
