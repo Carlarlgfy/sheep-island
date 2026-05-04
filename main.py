@@ -4,6 +4,7 @@ import random
 import math
 import threading
 import json
+import time
 from pathlib import Path
 
 from mapgen import (
@@ -47,6 +48,9 @@ BOTTOM_BAR_H = 48
 
 SPEED_SCALES = [0, 1, 3, 8]
 SPEED_LABELS = ["||", ">", ">>", ">>>"]
+
+HERD_UPDATE_STEP = 0.25
+TERRAIN_SPREAD_STEP = 0.50
 
 CHARACTER_SAVE_PATH = Path("characters.json")
 
@@ -420,7 +424,14 @@ def draw_group_overlays(screen, overlay_surf, cam_x, cam_y, tile_size,
             herds.setdefault(hid, []).append(s)
 
     for members in herds.values():
-        pts = [(m.tx * tile_size - cam_x, m.ty * tile_size - cam_y) for m in members]
+        if len(members) > 90:
+            step = max(1, len(members) // 90)
+            draw_members = members[::step]
+        else:
+            draw_members = members
+        pts = [(m.tx * tile_size - cam_x, m.ty * tile_size - cam_y) for m in draw_members]
+        if not pts:
+            continue
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
 
@@ -455,7 +466,14 @@ def draw_group_overlays(screen, overlay_surf, cam_x, cam_y, tile_size,
             packs.setdefault(pid, []).append(w)
 
     for members in packs.values():
-        pts = [(m.tx * tile_size - cam_x, m.ty * tile_size - cam_y) for m in members]
+        if len(members) > 90:
+            step = max(1, len(members) // 90)
+            draw_members = members[::step]
+        else:
+            draw_members = members
+        pts = [(m.tx * tile_size - cam_x, m.ty * tile_size - cam_y) for m in draw_members]
+        if not pts:
+            continue
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
 
@@ -496,6 +514,7 @@ def draw_play_ui(screen, font_ui, back_btn,
                  seed, tile_size, screen_w, screen_h, is_fullscreen,
                  speed_btns, sim_speed_idx, day_number,
                  stats_btn=None, stats_open=False, stats_lines=None,
+                 profiling_btn=None, profiling_open=False, profiling_lines=None,
                  groups_btn=None, show_groups=False,
                  cur_map_w=1024, cur_map_h=1024,
                  flower_opt_btns=None, flower_mode=None):
@@ -515,6 +534,10 @@ def draw_play_ui(screen, font_ui, back_btn,
     if stats_btn is not None:
         stats_btn["color"] = (85, 125, 165) if stats_open else (70, 70, 110)
         draw_button(screen, stats_btn, font_ui)
+
+    if profiling_btn is not None:
+        profiling_btn["color"] = (150, 115, 50) if profiling_open else (70, 70, 110)
+        draw_button(screen, profiling_btn, font_ui)
 
     if groups_btn is not None:
         groups_btn["color"] = (60, 140, 110) if show_groups else (70, 70, 110)
@@ -544,7 +567,7 @@ def draw_play_ui(screen, font_ui, back_btn,
         True, (160, 160, 160),
     )
     hint_start_x = 16
-    for btn in (spawner_btn, terrain_btn, stats_btn, groups_btn):
+    for btn in (spawner_btn, terrain_btn, stats_btn, profiling_btn, groups_btn):
         if btn is not None:
             hint_start_x = max(hint_start_x, btn["rect"].right + 16)
     screen.blit(hint, hint.get_rect(midleft=(hint_start_x, screen_h - BOTTOM_BAR_H // 2)))
@@ -571,6 +594,23 @@ def draw_play_ui(screen, font_ui, back_btn,
         pygame.draw.rect(screen, (88, 108, 138), panel, width=2, border_radius=10)
         for i, line in enumerate(stats_lines):
             surf = font_ui.render(line, True, (220, 226, 235))
+            screen.blit(surf, (panel_x + 12, panel_y + 10 + i * line_h))
+
+    if profiling_open and profiling_lines:
+        panel_w = 360
+        line_h = 21
+        panel_h = 18 + line_h * len(profiling_lines)
+        panel_x = screen_w - panel_w - 10
+        stats_offset = 0
+        if stats_open and stats_lines:
+            stats_offset = 16 + 22 * len(stats_lines) + 12
+        panel_y = screen_h - BOTTOM_BAR_H - panel_h - 10 - stats_offset
+        panel = pygame.Rect(panel_x, panel_y, panel_w, panel_h)
+        pygame.draw.rect(screen, (28, 26, 22), panel, border_radius=10)
+        pygame.draw.rect(screen, (150, 122, 70), panel, width=2, border_radius=10)
+        for i, line in enumerate(profiling_lines):
+            color = (238, 225, 190) if i == 0 else (222, 226, 220)
+            surf = font_ui.render(line, True, color)
             screen.blit(surf, (panel_x + 12, panel_y + 10 + i * line_h))
 
 
@@ -698,7 +738,7 @@ def update_button_layout(
         campaign_btn, sandbox_btn, load_btn, start_back_btn,
         island_btn, continent_btn, map_back_btn,
         back_btn, spawner_btn, terrain_btn,
-        stats_btn, groups_btn, speed_btns,
+        stats_btn, profiling_btn, groups_btn, speed_btns,
         screen_w, screen_h,
         creator_buttons=None, option_buttons=None):
 
@@ -727,14 +767,15 @@ def update_button_layout(
     # --- Play screen ---
     back_btn["rect"] = pygame.Rect(10, 10, 155, 40)
 
-    # Bottom bar: Spawner | Terrain | Stats | Groups  (left side)
+    # Bottom bar: Spawner | Terrain | Stats | Profile | Groups  (left side)
     bbw, bbh = 100, 36
     gap = 6
     by = screen_h - BOTTOM_BAR_H + 6
     spawner_btn["rect"] = pygame.Rect(10,                       by, bbw, bbh)
     terrain_btn["rect"] = pygame.Rect(10 + (bbw + gap),         by, bbw, bbh)
     stats_btn["rect"]   = pygame.Rect(10 + (bbw + gap) * 2,     by, bbw, bbh)
-    groups_btn["rect"]  = pygame.Rect(10 + (bbw + gap) * 3,     by, bbw, bbh)
+    profiling_btn["rect"] = pygame.Rect(10 + (bbw + gap) * 3,   by, bbw, bbh)
+    groups_btn["rect"]  = pygame.Rect(10 + (bbw + gap) * 4,     by, bbw, bbh)
 
     # Speed buttons — top right, horizontal row
     sbw, sbh = 44, 34
@@ -845,6 +886,7 @@ def main():
     spawner_btn   = {"label": "Spawner",           "rect": pygame.Rect(0,0,0,0), "color": (70, 70, 110)}
     terrain_btn   = {"label": "Terrain",           "rect": pygame.Rect(0,0,0,0), "color": (70, 70, 110)}
     stats_btn     = {"label": "Stats",             "rect": pygame.Rect(0,0,0,0), "color": (70, 70, 110)}
+    profiling_btn = {"label": "Profile",           "rect": pygame.Rect(0,0,0,0), "color": (70, 70, 110)}
     groups_btn    = {"label": "Groups",            "rect": pygame.Rect(0,0,0,0), "color": (70, 70, 110)}
     speed_btns    = [{"label": lbl, "rect": pygame.Rect(0,0,0,0), "color": (70, 70, 110)}
                      for lbl in SPEED_LABELS]
@@ -914,6 +956,7 @@ def main():
     spawner_open      = False
     terrain_open      = False
     stats_open        = False
+    profiling_open    = False
     show_groups       = False
     regrowth_timers: dict[tuple, float] = {}
     time_of_day       = 0.0
@@ -938,6 +981,41 @@ def main():
     _lsheep_grazing = False
     _lsheep_facing  = "right"
     _lsheep_surf: pygame.Surface | None = None
+    _profile_ms: dict[str, float] = {}
+    _profile_counts: dict[str, int] = {}
+    _frame_ms = 0.0
+    _sim_frame = 0
+    _herd_update_accum = 0.0
+    _terrain_spread_accum = 0.0
+
+    def _profile_add(label: str, start_time: float):
+        elapsed_ms = (time.perf_counter() - start_time) * 1000.0
+        prev = _profile_ms.get(label)
+        _profile_ms[label] = elapsed_ms if prev is None else prev * 0.9 + elapsed_ms * 0.1
+
+    def _profile_count(label: str, count: int):
+        _profile_counts[label] = count
+
+    def _profile_lines():
+        lines = [
+            f"Frame avg: {_frame_ms:5.1f} ms  FPS est: {1000.0 / max(_frame_ms, 0.001):4.0f}",
+            f"Sheep: {len(sheep_list)}   Wolves: {len(wolf_list)}",
+        ]
+        for label, ms in sorted(_profile_ms.items(), key=lambda item: item[1], reverse=True)[:10]:
+            count = _profile_counts.get(label)
+            suffix = f" ({count})" if count is not None else ""
+            pct = ms / max(_frame_ms, 0.001) * 100.0
+            lines.append(f"{label}: {ms:5.2f} ms {pct:4.0f}%{suffix}")
+        return lines
+
+    def _sheep_update_stride(count: int) -> int:
+        if count >= 450:
+            return 4
+        if count >= 300:
+            return 3
+        if count >= 160:
+            return 2
+        return 1
 
     def mark_terrain_changed(row: int, col: int):
         if terrain_renderer is not None:
@@ -1000,7 +1078,7 @@ def main():
             campaign_btn, sandbox_btn, load_btn, start_back_btn,
             island_btn, continent_btn, map_back_btn,
             back_btn, spawner_btn, terrain_btn,
-            stats_btn, groups_btn, speed_btns,
+            stats_btn, profiling_btn, groups_btn, speed_btns,
             screen_w, screen_h,
             creator_buttons=creator_buttons,
             option_buttons=character_option_buttons)
@@ -1052,6 +1130,7 @@ def main():
                         spawner_open = False
                         terrain_open = False
                         stats_open   = False
+                        profiling_open = False
                         show_groups  = False
 
                 elif state == STATE_CHARACTER_CREATOR:
@@ -1172,6 +1251,7 @@ def main():
                         spawner_open = False
                         terrain_open = False
                         stats_open   = False
+                        profiling_open = False
                         show_groups  = False
                         clicked_ui   = True
 
@@ -1198,6 +1278,10 @@ def main():
 
                     elif stats_btn["rect"].collidepoint(mouse_pos):
                         stats_open = not stats_open
+                        clicked_ui = True
+
+                    elif profiling_btn["rect"].collidepoint(mouse_pos):
+                        profiling_open = not profiling_open
                         clicked_ui = True
 
                     elif groups_btn["rect"].collidepoint(mouse_pos):
@@ -1401,6 +1485,7 @@ def main():
                 spawner_open     = False
                 terrain_open     = False
                 stats_open       = False
+                profiling_open   = False
                 show_groups      = False
                 regrowth_timers  = {}
                 time_of_day      = 0.0
@@ -1408,12 +1493,16 @@ def main():
                 herd_manager     = HerdManager()
                 wolf_pack_manager = WolfPackManager()
                 proximity_scanner = ProximityScanner()
+                _sim_frame       = 0
+                _herd_update_accum = 0.0
+                _terrain_spread_accum = 0.0
                 _gen_event       = None
                 state            = STATE_PLAY
 
 
         # --- Camera movement ---
         if state == STATE_PLAY:
+            play_update_start = time.perf_counter()
             target_zoom = max(TILE_SIZE_MIN, min(TILE_SIZE_MAX, target_zoom))
             if abs(current_zoom - target_zoom) > 0.001:
                 anchor_tx, anchor_ty = screen_to_world(
@@ -1444,31 +1533,61 @@ def main():
                                         cur_map_w, cur_map_h)
 
             dt_sim = dt * SPEED_SCALES[sim_speed_idx]
+            _sim_frame += 1
 
             prev_time_of_day = time_of_day
             time_of_day = (time_of_day + dt_sim) % DAY_CYCLE_DURATION
             if time_of_day < prev_time_of_day:
                 day_number += 1
 
+            scanner_start = time.perf_counter()
             proximity_scanner.update(sheep_list, wolf_list)
+            _profile_add("proximity scanner", scanner_start)
 
-            herd_manager.update(dt_sim, sheep_list, grid, wolves=wolf_list)
+            herd_start = time.perf_counter()
+            _herd_update_accum += dt_sim
+            if (_herd_update_accum >= HERD_UPDATE_STEP or len(sheep_list) < 120
+                    or sim_speed_idx == 0):
+                herd_dt = _herd_update_accum
+                _herd_update_accum = 0.0
+                herd_manager.update(herd_dt, sheep_list, grid, wolves=wolf_list)
+            _profile_add("herd update", herd_start)
+
+            ram_start = time.perf_counter()
             Ram.update_fights(dt_sim)
+            _profile_add("ram fights", ram_start)
 
+            pack_start = time.perf_counter()
             wolf_pack_manager.update(dt_sim, wolf_list, sheep_list, grid)
+            _profile_add("wolf pack update", pack_start)
+
+            wolves_start = time.perf_counter()
             new_wolves: list[Wolf] = []
             for wolf in wolf_list:
                 wolf.update(dt_sim, grid, sheep_list, wolf_list, new_wolves)
             wolf_list = [w for w in wolf_list if w.alive]
             wolf_list.extend(new_wolves)
+            _profile_add("wolf entity update", wolves_start)
+            _profile_count("wolf entity update", len(wolf_list))
 
+            sheep_start = time.perf_counter()
             new_sheep: list[Sheep] = []
-            for sheep in sheep_list:
-                sheep.update(dt_sim, grid, regrowth_timers, sheep_list, new_sheep,
+            sheep_count_before = len(sheep_list)
+            sheep_stride = _sheep_update_stride(sheep_count_before)
+            sheep_batch = _sim_frame % sheep_stride
+            sheep_dt = dt_sim * sheep_stride
+            for idx, sheep in enumerate(sheep_list):
+                if sheep_stride > 1 and idx % sheep_stride != sheep_batch:
+                    continue
+                sheep.update(sheep_dt, grid, regrowth_timers, sheep_list, new_sheep,
                              dirty_callback=mark_terrain_changed)
             sheep_list = [s for s in sheep_list if s.alive]
             sheep_list.extend(new_sheep)
+            _profile_add("sheep entity update", sheep_start)
+            _profile_count("sheep entity update", len(sheep_list))
+            _profile_count("sheep update batch", max(1, sheep_count_before // sheep_stride))
 
+            regrowth_start = time.perf_counter()
             for pos in list(regrowth_timers):
                 regrowth_timers[pos] -= dt_sim
                 if regrowth_timers[pos] <= 0:
@@ -1477,13 +1596,25 @@ def main():
                         grid[r][c] = GRASS
                         mark_terrain_changed(r, c)
                     del regrowth_timers[pos]
+            _profile_add("grass regrowth", regrowth_start)
+            _profile_count("grass regrowth", len(regrowth_timers))
 
-            if grass_spread is not None:
-                grass_spread.update(dt_sim, notify=mark_terrain_changed)
-            if tundra_spread is not None:
-                tundra_spread.update(dt_sim, notify=mark_terrain_changed)
+            spread_start = time.perf_counter()
+            _terrain_spread_accum += dt_sim
+            if (_terrain_spread_accum >= TERRAIN_SPREAD_STEP or len(sheep_list) < 120
+                    or sim_speed_idx == 0):
+                spread_dt = _terrain_spread_accum
+                _terrain_spread_accum = 0.0
+                if grass_spread is not None:
+                    grass_spread.update(spread_dt, notify=mark_terrain_changed)
+                if tundra_spread is not None:
+                    tundra_spread.update(spread_dt, notify=mark_terrain_changed)
+            _profile_add("terrain spread", spread_start)
 
+            terrain_anim_start = time.perf_counter()
             terrain_renderer.update(dt_sim)
+            _profile_add("terrain animation", terrain_anim_start)
+            _profile_add("play update total", play_update_start)
 
         # --- Render ---
         if state == STATE_TITLE:
@@ -1512,18 +1643,34 @@ def main():
 
         elif state == STATE_PLAY:
             screen.fill(WATER_COLOR)
+            terrain_draw_start = time.perf_counter()
             terrain_renderer.draw(screen, current_zoom, cam_x, cam_y, screen_w, screen_h)
+            _profile_add("terrain draw", terrain_draw_start)
+
+            flower_draw_start = time.perf_counter()
             flower_manager.draw_all(screen, cam_x, cam_y, current_zoom, screen_w, screen_h)
+            _profile_add("flower draw", flower_draw_start)
+
+            sheep_draw_start = time.perf_counter()
             for sheep in sheep_list:
                 sheep.draw(screen, cam_x, cam_y, current_zoom)
+            _profile_add("sheep draw", sheep_draw_start)
+            _profile_count("sheep draw", len(sheep_list))
+
+            wolf_draw_start = time.perf_counter()
             for wolf in wolf_list:
                 wolf.draw(screen, cam_x, cam_y, current_zoom)
+            _profile_add("wolf draw", wolf_draw_start)
+            _profile_count("wolf draw", len(wolf_list))
 
             if show_groups:
+                group_draw_start = time.perf_counter()
                 draw_group_overlays(screen, _group_overlay, cam_x, cam_y, current_zoom,
                                     sheep_list, wolf_list)
+                _profile_add("group overlay draw", group_draw_start)
 
             # Day/night overlay
+            overlay_start = time.perf_counter()
             cycle_pos   = time_of_day / DAY_CYCLE_DURATION
             night_factor = 0.5 - 0.5 * math.cos(2 * math.pi * cycle_pos)
             if night_factor > 0.01:
@@ -1532,7 +1679,9 @@ def main():
                 night_surf.fill((8, 18, 55))
                 night_surf.set_alpha(alpha)
                 screen.blit(night_surf, (0, 0))
+            _profile_add("day night overlay", overlay_start)
 
+            ui_start = time.perf_counter()
             living        = [s for s in sheep_list if getattr(s, 'dead_state', None) is None]
             living_count  = len(living)
             ram_count     = sum(1 for s in living if isinstance(s, Ram))
@@ -1559,6 +1708,8 @@ def main():
                 current_seed, current_zoom, screen_w, screen_h, is_fullscreen,
                 speed_btns, sim_speed_idx, day_number,
                 stats_btn=stats_btn, stats_open=stats_open, stats_lines=stats_lines,
+                profiling_btn=profiling_btn, profiling_open=profiling_open,
+                profiling_lines=_profile_lines(),
                 groups_btn=groups_btn, show_groups=show_groups,
                 cur_map_w=cur_map_w, cur_map_h=cur_map_h,
                 flower_opt_btns=flower_opt_btns, flower_mode=flower_mode,
@@ -1604,8 +1755,13 @@ def main():
                         if terrain_brush > 1:
                             brush_label = font_ui.render(f"{terrain_brush}x{terrain_brush}", True, color)
                             screen.blit(brush_label, (mx + 8, my - 16))
+            _profile_add("play ui draw", ui_start)
 
+        flip_start = time.perf_counter()
         pygame.display.flip()
+        _profile_add("display flip", flip_start)
+        frame_elapsed = dt * 1000.0
+        _frame_ms = frame_elapsed if _frame_ms <= 0 else _frame_ms * 0.9 + frame_elapsed * 0.1
 
 
 if __name__ == "__main__":
