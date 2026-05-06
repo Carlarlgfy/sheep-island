@@ -420,7 +420,8 @@ class Wolf:
         return (ddx / dist) * pull, (ddy / dist) * pull
 
     def _bad_terrain_avoidance_delta(self, grid: list, dt: float) -> tuple:
-        """Push wolf away from snow (cold damage) and sand/water (beach stranding)."""
+        """Push wolf away from snow (cold damage) and sand/water (beach stranding).
+        Strong enough to decisively redirect even during high-speed hunts."""
         if not grid:
             return 0.0, 0.0
         rows = len(grid)
@@ -436,7 +437,7 @@ class Wolf:
                 if tile == SNOW:
                     push = 5.0
                 elif tile in (SAND, WATER):
-                    push = 14.0   # strong enough to overcome hunt/flee momentum
+                    push = 22.0   # must exceed hunt speed (move_speed * WOLF_HUNT_SPEED)
                 else:
                     continue
                 dist = math.hypot(float(dc), float(dr)) or 0.01
@@ -444,6 +445,15 @@ class Wolf:
                 sx  -= (dc / dist) * w
                 sy  -= (dr / dist) * w
         return sx, sy
+
+    def _on_bad_terrain(self, grid: list) -> bool:
+        """True if the wolf's current tile is sand or water."""
+        if not grid:
+            return False
+        r, c = int(self.ty), int(self.tx)
+        rows = len(grid)
+        cols = len(grid[0]) if rows else 0
+        return 0 <= r < rows and 0 <= c < cols and grid[r][c] in (SAND, WATER)
 
     def _best_flee_direction(self, grid: list) -> tuple:
         """8-way scan — return direction with the most grass/dirt tiles."""
@@ -481,9 +491,13 @@ class Wolf:
             self.dy = ddy / dist
         self._refresh_facing()
         sx, sy = self._separation_delta(dt)
-        spd    = self.move_speed * speed_mult
-        nx     = self.tx + self.dx * spd * dt + sx
-        ny     = self.ty + self.dy * spd * dt + sy
+        # Beach/snow avoidance runs in ALL movement modes (hunt, eat, etc.)
+        wx, wy = self._bad_terrain_avoidance_delta(grid, dt)
+        sx += wx
+        sy += wy
+        spd = self.move_speed * speed_mult
+        nx  = self.tx + self.dx * spd * dt + sx
+        ny  = self.ty + self.dy * spd * dt + sy
         self.tx, self.ty, _ = advance_until_blocked(grid, self.tx, self.ty, nx, ny)
 
     # ------------------------------------------------------------------
@@ -774,15 +788,24 @@ class Wolf:
             fx = self.tx - self._flee_cx
             fy = self.ty - self._flee_cy
             fd = math.hypot(fx, fy)
-            if fd > 0.5:
+            if fd > 0.5 and not self._on_bad_terrain(grid):
                 self.dx, self.dy = fx / fd, fy / fd
             else:
+                # Either right on top of threat, or standing on sand/water → use grass-scanner
                 self.dx, self.dy = self._best_flee_direction(grid)
             self._refresh_facing()
             sx, sy = self._separation_delta(dt)
+            wx, wy = self._bad_terrain_avoidance_delta(grid, dt)
+            sx += wx
+            sy += wy
+            old_tx, old_ty = self.tx, self.ty
             nx = self.tx + self.dx * self.move_speed * WOLF_FLEE_SPEED * dt + sx
             ny = self.ty + self.dy * self.move_speed * WOLF_FLEE_SPEED * dt + sy
-            self.tx, self.ty, _ = advance_until_blocked(grid, self.tx, self.ty, nx, ny)
+            self.tx, self.ty, blocked = advance_until_blocked(grid, self.tx, self.ty, nx, ny)
+            # If completely stuck against water edge, immediately use grass-scanner
+            if blocked and abs(self.tx - old_tx) < 1e-6 and abs(self.ty - old_ty) < 1e-6:
+                self.dx, self.dy = self._best_flee_direction(grid)
+                self._refresh_facing()
             if self._flee_timer <= 0 and self.hp >= self.max_hp * 0.45:
                 self.state = Wolf.IDLE
                 self.timer = random.uniform(2.0, 5.0)
@@ -819,6 +842,15 @@ class Wolf:
 
         # ── HUNT ────────────────────────────────────────────────────────
         if self.state == Wolf.HUNT:
+            # If standing on sand/water, abort hunt and escape immediately
+            if self._on_bad_terrain(grid):
+                self._hunt_target = None
+                self.state  = Wolf.WALK
+                self.dx, self.dy = self._best_flee_direction(grid)
+                self._refresh_facing()
+                self.timer  = random.uniform(3.0, 6.0)
+                return
+
             # Flee if badly hurt
             if self.hp < self.max_hp * WOLF_FLEE_HP_FRAC:
                 ref = self._hunt_target

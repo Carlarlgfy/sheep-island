@@ -64,6 +64,23 @@ EXODUS_CHANCE   = 0.00035  # probability per adult excess per second
 HOME_RELOCATE_HUNT_TIME = DAY * 1.5   # after this long in HUNT with no kill, seek new home
 HOME_RELOCATE_SEARCH_R  = 200.0       # tile radius to scan for prey-rich area
 
+# Dynamic territory cells
+TERRITORY_CELL      = 15     # tile size per cell — visible at low zoom
+TERRITORY_HEAT_RATE = 0.55   # heat added per wolf-second while in a cell
+TERRITORY_DECAY     = 0.009  # heat lost per second without visits (~cold in 55s)
+TERRITORY_CLAIMED   = 0.12   # minimum heat to display/claim a cell
+TERRITORY_MAX_HEAT  = 3.0    # heat cap
+TERRITORY_HOME_HEAT = TERRITORY_MAX_HEAT  # home cell always stays hot
+TERRITORY_MAX_CELLS = 320    # prune above this
+
+# Pack showdowns — triggered by territory overlap
+CONFLICT_MIN_CELLS  = 3      # shared claimed cells before conflict timer starts
+CONFLICT_TIMER_MIN  = 70.0   # seconds of overlap before showdown triggers
+CONFLICT_TIMER_MAX  = 150.0
+CONFLICT_COOLDOWN   = DAY    # after a showdown before same pair can fight again
+SHOWDOWN_POWER_VAR  = 0.22   # ±random power variation
+SHOWDOWN_ALPHA_MULT = 0.55   # alpha wolf strength bonus on top of pack power
+
 
 # ---------------------------------------------------------------------------
 # Per-pack state
@@ -76,30 +93,32 @@ class _PackData:
         "home_x", "home_y", "home_radius", "home_recheck_timer",
         "ratio_fight_timer", "alpha_id", "starve_timer",
         "name", "color_idx",
+        "territory_cells",   # dict: (cell_x, cell_y) → heat float
     )
     REST = "rest"
     HUNT = "hunt"
 
     def __init__(self):
-        self.cx         = 0.0
-        self.cy         = 0.0
-        self.size       = 0
-        self.mode       = _PackData.REST
-        self.scan_timer = random.uniform(0, SCAN_INTERVAL)
-        self.hunt_target = None
-        self.travel_x   = 0.0
-        self.travel_y   = 0.0
+        self.cx           = 0.0
+        self.cy           = 0.0
+        self.size         = 0
+        self.mode         = _PackData.REST
+        self.scan_timer   = random.uniform(0, SCAN_INTERVAL)
+        self.hunt_target  = None
+        self.travel_x     = 0.0
+        self.travel_y     = 0.0
         self.travel_timer = 0.0
-        self.home_x     = 0.0
-        self.home_y     = 0.0
-        self.home_radius = HOME_RADIUS_BASE
+        self.home_x       = 0.0
+        self.home_y       = 0.0
+        self.home_radius  = HOME_RADIUS_BASE
         self.home_recheck_timer = random.uniform(60.0, 180.0)
         self.ratio_fight_timer  = random.uniform(
             RATIO_FIGHT_INTERVAL * 0.3, RATIO_FIGHT_INTERVAL)
-        self.alpha_id   = None
+        self.alpha_id     = None
         self.starve_timer = 0.0
-        self.name       = ""
-        self.color_idx  = 0
+        self.name         = ""
+        self.color_idx    = 0
+        self.territory_cells: dict = {}   # (cx, cy) → heat
 
 
 # ---------------------------------------------------------------------------
@@ -132,6 +151,8 @@ class WolfPackManager:
         self._timer = 0.0
         self._packs: dict[int, _PackData] = {}
         self._grid: list | None = None
+        self._conflict_timers: dict = {}   # frozenset({pid,pid}) → remaining seconds
+        self._conflict_cooling: dict = {}  # frozenset({pid,pid}) → cooldown seconds
 
     # ------------------------------------------------------------------
     # Public update — called once per frame from main.py
@@ -158,6 +179,8 @@ class WolfPackManager:
                 if w.pack_id >= 0:
                     by_pack.setdefault(w.pack_id, []).append(w)
             self._update_packs(dt, living, by_pack, sheep_list, grid)
+            self._update_territory(dt, by_pack)
+            self._update_conflicts(dt, by_pack, living)
             self._apply_rival_pack_pressure(by_pack)
 
     # ------------------------------------------------------------------
@@ -230,8 +253,9 @@ class WolfPackManager:
                 nd.travel_x          = od.travel_x
                 nd.travel_y          = od.travel_y
                 nd.travel_timer      = od.travel_timer
-                nd.name              = od.name       # pack keeps its name through regroupings
+                nd.name              = od.name
                 nd.color_idx         = od.color_idx
+                nd.territory_cells   = dict(od.territory_cells)
                 transferred.add(best_new)
 
         self._packs = new_packs
@@ -391,6 +415,152 @@ class WolfPackManager:
     # ------------------------------------------------------------------
     # Home base helpers
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Dynamic territory
+    # ------------------------------------------------------------------
+
+    def _cell_for(self, x: float, y: float) -> tuple[int, int]:
+        return (int(x / TERRITORY_CELL), int(y / TERRITORY_CELL))
+
+    def _cell_center(self, cx: int, cy: int) -> tuple[float, float]:
+        return ((cx + 0.5) * TERRITORY_CELL, (cy + 0.5) * TERRITORY_CELL)
+
+    def _update_territory(self, dt: float, by_pack: dict):
+        for pid, members in by_pack.items():
+            data = self._packs.get(pid)
+            if data is None:
+                continue
+            cells = data.territory_cells
+            home_cell = self._cell_for(data.home_x, data.home_y) if data.home_x else None
+
+            # Decay every cell
+            dead = [c for c, h in cells.items() if h - TERRITORY_DECAY * dt <= 0 and c != home_cell]
+            for c in dead:
+                del cells[c]
+            for c in [k for k in cells if k not in dead]:
+                if c == home_cell:
+                    cells[c] = TERRITORY_HOME_HEAT
+                else:
+                    cells[c] = min(TERRITORY_MAX_HEAT, cells[c] - TERRITORY_DECAY * dt)
+
+            # Each wolf stamps heat onto its cell — skip if on sand/water
+            grid = self._grid
+            for w in members:
+                if grid:
+                    rows = len(grid)
+                    cols = len(grid[0]) if rows else 0
+                    r0, c0 = int(w.ty), int(w.tx)
+                    if 0 <= r0 < rows and 0 <= c0 < cols:
+                        tile = grid[r0][c0]
+                        if tile in ("sand", "water", "wall"):
+                            continue
+                c = self._cell_for(w.tx, w.ty)
+                cells[c] = min(TERRITORY_MAX_HEAT, cells.get(c, 0.0) + TERRITORY_HEAT_RATE * dt)
+
+            # Keep home cell always at max
+            if home_cell:
+                cells[home_cell] = TERRITORY_HOME_HEAT
+
+            # Prune to max cells — remove coolest non-home cells first
+            if len(cells) > TERRITORY_MAX_CELLS:
+                ranked = sorted((c for c in cells if c != home_cell),
+                                key=lambda c: cells[c])
+                for c in ranked[:len(cells) - TERRITORY_MAX_CELLS]:
+                    del cells[c]
+
+    # ------------------------------------------------------------------
+    # Pack showdowns
+    # ------------------------------------------------------------------
+
+    def _update_conflicts(self, dt: float, by_pack: dict, all_wolves: list):
+        """Detect territory overlap → start conflict timer → trigger showdown."""
+        # Tick cooldowns
+        for pair in list(self._conflict_cooling):
+            self._conflict_cooling[pair] -= dt
+            if self._conflict_cooling[pair] <= 0:
+                del self._conflict_cooling[pair]
+
+        pids = list(by_pack.keys())
+        for i, pid_a in enumerate(pids):
+            da = self._packs.get(pid_a)
+            if da is None:
+                continue
+            for pid_b in pids[i + 1:]:
+                db = self._packs.get(pid_b)
+                if db is None:
+                    continue
+                pair = frozenset({pid_a, pid_b})
+                if pair in self._conflict_cooling:
+                    continue
+
+                # Count shared claimed cells
+                claimed_a = {c for c, h in da.territory_cells.items() if h >= TERRITORY_CLAIMED}
+                claimed_b = {c for c, h in db.territory_cells.items() if h >= TERRITORY_CLAIMED}
+                overlap = len(claimed_a & claimed_b)
+
+                if overlap >= CONFLICT_MIN_CELLS:
+                    if pair not in self._conflict_timers:
+                        self._conflict_timers[pair] = random.uniform(
+                            CONFLICT_TIMER_MIN, CONFLICT_TIMER_MAX)
+                    else:
+                        self._conflict_timers[pair] -= dt
+                        if self._conflict_timers[pair] <= 0:
+                            del self._conflict_timers[pair]
+                            self._trigger_showdown(pid_a, pid_b, by_pack, all_wolves)
+                            self._conflict_cooling[pair] = CONFLICT_COOLDOWN
+                else:
+                    self._conflict_timers.pop(pair, None)
+
+    def _trigger_showdown(self, pid_a: int, pid_b: int,
+                          by_pack: dict, all_wolves: list):
+        """Packs fight: one wolf dies, loser pack flees and relocates home."""
+        ma = [w for w in by_pack.get(pid_a, []) if w.alive and w.dead_state is None]
+        mb = [w for w in by_pack.get(pid_b, []) if w.alive and w.dead_state is None]
+        da = self._packs.get(pid_a)
+        db = self._packs.get(pid_b)
+        if not ma or not mb or da is None or db is None:
+            return
+
+        def pack_power(members, data):
+            base = sum(w.genetic_strength * (w.hp / max(1.0, w.max_hp)) * w.genetic_size
+                       for w in members)
+            # Alpha's raw strength gives a bonus (a dominant alpha can carry a small pack)
+            alpha = max(members, key=lambda w: w.genetic_strength * w.genetic_size)
+            base += alpha.genetic_strength * alpha.genetic_size * SHOWDOWN_ALPHA_MULT
+            return base * random.uniform(1.0 - SHOWDOWN_POWER_VAR, 1.0 + SHOWDOWN_POWER_VAR)
+
+        pa = pack_power(ma, da)
+        pb = pack_power(mb, db)
+
+        if pa >= pb:
+            w_members, l_members, wd, ld = ma, mb, da, db
+        else:
+            w_members, l_members, wd, ld = mb, ma, db, da
+
+        # Weakest loser wolf dies — the kill that ends the showdown
+        victim = min(l_members, key=lambda w: self._dominance_score(w))
+        victim.hp = 0.0
+        victim._die()
+
+        # All surviving loser wolves flee toward away from winner pack centre
+        for w in l_members:
+            if w.alive and w.dead_state is None:
+                w.state = "flee"
+                w._flee_timer = random.uniform(35.0, 65.0)
+                w._flee_cx = wd.cx
+                w._flee_cy = wd.cy
+
+        # Winner pack gains contested territory cells
+        contested = (set(wd.territory_cells) & set(ld.territory_cells))
+        for c in contested:
+            wd.territory_cells[c] = min(TERRITORY_MAX_HEAT,
+                                        wd.territory_cells.get(c, 0.0) + 1.5)
+            ld.territory_cells.pop(c, None)
+
+        # Loser must relocate home base
+        new_home = self._find_better_home(ld, self._grid)
+        ld.home_x, ld.home_y = new_home
 
     def _nearest_other_pack_center(self, own_pid: int, cx: float, cy: float,
                                    max_range: float) -> tuple[float, float] | None:
@@ -698,19 +868,25 @@ class WolfPackManager:
     # ------------------------------------------------------------------
 
     def get_pack_territories(self) -> list:
+        C = TERRITORY_CELL
         return [
             {
-                "pack_id":     pid,
-                "cx":          d.cx,
-                "cy":          d.cy,
-                "home_x":      d.home_x,
-                "home_y":      d.home_y,
-                "home_radius": d.home_radius,
-                "mode":        d.mode,
-                "size":        d.size,
-                "name":        d.name,
-                "color_idx":   d.color_idx,
-                "cells":       [],
+                "pack_id":    pid,
+                "cx":         d.cx,
+                "cy":         d.cy,
+                "home_x":     d.home_x,
+                "home_y":     d.home_y,
+                "home_radius": HOME_RADIUS_BASE,   # small home circle, always fixed
+                "mode":       d.mode,
+                "size":       d.size,
+                "name":       d.name,
+                "color_idx":  d.color_idx,
+                "cell_px":    C,   # tile-size of each cell (for renderer)
+                # Only claimed cells with their heat — renderer colours by intensity
+                "cells": [(cx * C, cy * C, h)
+                          for (cx, cy), h in d.territory_cells.items()
+                          if h >= TERRITORY_CLAIMED],
+                "conflict": any(pid in pair for pair in self._conflict_timers),
             }
             for pid, d in self._packs.items() if d.size > 0
         ]

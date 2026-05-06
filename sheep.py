@@ -622,9 +622,9 @@ class Sheep:
 
     def _beach_avoidance_delta(self, grid: list, rows: int, cols: int, dt: float) -> tuple:
         """Push sheep away from sand and water tiles to prevent beach stranding.
-        Strong enough to overcome wolf-flee direction when close to the shore."""
+        Strong enough to overcome wolf-flee direction (fear_mult=2 × move_speed)."""
         sx = sy = 0.0
-        PUSH = 14.0
+        PUSH = 26.0
         CHECK_R = 5
         for dr in range(-CHECK_R, CHECK_R + 1, 2):
             for dc in range(-CHECK_R, CHECK_R + 1, 2):
@@ -1309,13 +1309,18 @@ class Sheep:
             self.tx = move_tx
             self.ty = move_ty
             if blocked:
-                cur_tile = grid[int(self.ty)][int(self.tx)] if (
-                    0 <= int(self.ty) < rows and 0 <= int(self.tx) < cols) else ""
+                cur_r = int(self.ty)
+                cur_c = int(self.tx)
+                cur_tile = (grid[cur_r][cur_c]
+                            if 0 <= cur_r < rows and 0 <= cur_c < cols else "")
                 if cur_tile in (SAND, WATER):
-                    # Stuck on beach — immediately steer inland rather than random IDLE
+                    # On beach — use grass-scanner and keep walking, no IDLE pause
                     self.dx, self.dy = self._best_inland_direction(grid, rows, cols)
                     self._refresh_facing()
-                    self.timer = max(self.timer, random.uniform(1.5, 3.0))
+                    self.timer = max(self.timer, random.uniform(2.0, 4.0))
+                    # Ignore wolf flee direction until off sand — override it
+                    self.wolf_flee_dx = self.dx
+                    self.wolf_flee_dy = self.dy
                 else:
                     self.state = Sheep.IDLE
                     self.dx    = 0.0

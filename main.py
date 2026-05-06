@@ -467,95 +467,94 @@ def draw_group_overlays(screen, overlay_surf, cam_x, cam_y, tile_size,
         pygame.draw.circle(ov, (80, 160, 255, 220), (int(cx), int(cy)), 6)
         pygame.draw.circle(ov, (220, 235, 255, 200), (int(cx), int(cy)), 3)
 
-    # ── Wolf pack home-base ranges + member hull ────────────────────────
+    # ── Wolf pack territory cells + home dot + member spokes ────────────
     global _pack_name_font
     if _pack_name_font is None:
         _pack_name_font = pygame.font.SysFont(None, 16)
 
-    # Build pack_id → color mapping from WolfPackManager
-    pack_color_map: dict[int, tuple] = {}
     territories = wolf_pack_manager.get_pack_territories() if wolf_pack_manager else []
+
+    # Build pack_id → (r,g,b) colour map
+    pack_color_map: dict[int, tuple] = {}
     for pack in territories:
         cidx = pack.get("color_idx", 0)
         pack_color_map[pack["pack_id"]] = _PACK_COLORS[cidx % len(_PACK_COLORS)]
 
-    # Draw home-base circles first (behind member hulls)
+    # 1. Draw territory cells (behind everything else)
     for pack in territories:
-        hx = pack["home_x"]
-        hy = pack["home_y"]
+        r, g, b = pack_color_map.get(pack["pack_id"], (220, 80, 220))
+        cell_tiles = pack.get("cell_px", 15)
+        cell_px    = max(1, int(cell_tiles * tile_size))
+        conflict   = pack.get("conflict", False)
+        for wx, wy, heat in pack.get("cells", []):
+            sx = int(wx * tile_size - cam_x)
+            sy = int(wy * tile_size - cam_y)
+            if sx + cell_px < 0 or sx > sw or sy + cell_px < 0 or sy > sh:
+                continue
+            t      = min(1.0, heat / 3.0)
+            fill_a = int(12 + t * 30)   # 12–42 alpha for fill
+            edge_a = int(40 + t * 100)  # 40–140 alpha for edge
+            # Conflict flashes the edge brighter
+            if conflict:
+                edge_a = min(255, edge_a + 80)
+            rect = (sx, sy, cell_px, cell_px)
+            pygame.draw.rect(ov, (r, g, b, fill_a), rect)
+            pygame.draw.rect(ov, (r, g, b, edge_a), rect, 1)
+
+    # 2. Draw home-base dot and name label
+    for pack in territories:
+        hx, hy = pack["home_x"], pack["home_y"]
         if hx == 0.0 and hy == 0.0:
             continue
         sx = int(hx * tile_size - cam_x)
         sy = int(hy * tile_size - cam_y)
-        hr = max(6, int(pack["home_radius"] * tile_size))
-        if sx + hr < 0 or sx - hr > sw or sy + hr < 0 or sy - hr > sh:
-            continue
-
         r, g, b = pack_color_map.get(pack["pack_id"], (220, 80, 220))
 
-        # Filled range circle — pack colour at low alpha
-        pygame.draw.circle(ov, (r, g, b, 22), (sx, sy), hr)
-        # Outer ring
-        pygame.draw.circle(ov, (r, g, b, 180), (sx, sy), hr, 2)
-        # Inner ring slightly smaller for depth
-        pygame.draw.circle(ov, (r, g, b, 70), (sx, sy), max(3, hr - 6), 1)
+        # Small home-zone circle (HOME_RADIUS_BASE tiles wide)
+        hr = max(4, int(pack["home_radius"] * tile_size))
+        if not (sx + hr < 0 or sx - hr > sw or sy + hr < 0 or sy - hr > sh):
+            pygame.draw.circle(ov, (r, g, b, 30), (sx, sy), hr)
+            pygame.draw.circle(ov, (r, g, b, 130), (sx, sy), hr, 1)
 
-        # Home-base centre — always yellow so it pops against any pack colour
+        # Bright yellow home dot — always visible
         pygame.draw.circle(ov, (255, 240, 60, 240), (sx, sy), 6)
         pygame.draw.circle(ov, (255, 255, 200, 200), (sx, sy), 3)
 
-        # Mode pip: small dot on top of centre — bright = hunting, dim = resting
+        # Mode pip (hunting = red, resting = dim)
         if pack["mode"] == "hunt":
-            pygame.draw.circle(ov, (255, 80, 40, 240), (sx, sy - 9), 3)
+            pygame.draw.circle(ov, (255, 70, 30, 230), (sx, sy - 10), 4)
         else:
-            pygame.draw.circle(ov, (200, 200, 200, 120), (sx, sy - 9), 3)
+            pygame.draw.circle(ov, (180, 180, 180, 110), (sx, sy - 10), 3)
 
-        # Pack name label below the centre dot
+        # Pack name
         name = pack.get("name", "")
-        if name and tile_size >= 5:
+        if name and tile_size >= 4:
             txt = _pack_name_font.render(name, True, (r, g, b))
             txt.set_alpha(210)
-            rect = txt.get_rect(center=(sx, sy + hr + 10))
-            ov.blit(txt, rect)
+            ov.blit(txt, txt.get_rect(center=(sx, sy + hr + 10)))
 
-    # Draw member hull on top of home circles, coloured by pack
-    packs: dict[int, list] = {}
+    # 3. Draw member spokes (thin lines from pack centre to each wolf)
+    packs_by_id: dict[int, list] = {}
     for w in wolf_list:
         if not w.alive or w.dead_state is not None:
             continue
         pid = getattr(w, 'pack_id', -1)
         if pid >= 0:
-            packs.setdefault(pid, []).append(w)
+            packs_by_id.setdefault(pid, []).append(w)
 
-    for pid, members in packs.items():
+    for pid, members in packs_by_id.items():
         r, g, b = pack_color_map.get(pid, (220, 80, 220))
-        step = max(1, len(members) // 90)
-        pts  = [(m.tx * tile_size - cam_x, m.ty * tile_size - cam_y)
-                for m in members[::step]]
+        pts = [(int(m.tx * tile_size - cam_x), int(m.ty * tile_size - cam_y))
+               for m in members]
         if not pts:
             continue
-        cx = sum(p[0] for p in pts) / len(pts)
-        cy = sum(p[1] for p in pts) / len(pts)
+        cx = sum(p[0] for p in pts) // len(pts)
+        cy = sum(p[1] for p in pts) // len(pts)
         for px, py in pts:
-            pygame.draw.line(ov, (r, g, b, 70), (int(cx), int(cy)), (int(px), int(py)), 1)
-        ipts = [(int(p[0]), int(p[1])) for p in pts]
-        if len(ipts) >= 3:
-            hull = _convex_hull(ipts)
-            if len(hull) >= 3:
-                inflated = _inflate_hull(hull, cx, cy, 16)
-                pygame.draw.polygon(ov, (r, g, b, 28), inflated)
-                pygame.draw.polygon(ov, (r, g, b, 170), inflated, 2)
-        elif len(ipts) == 2:
-            pygame.draw.line(ov, (r, g, b, 80), ipts[0], ipts[1], 2)
-            for p in ipts:
-                pygame.draw.circle(ov, (r, g, b, 45), p, 16)
-                pygame.draw.circle(ov, (r, g, b, 140), p, 16, 2)
-        else:
-            pygame.draw.circle(ov, (r, g, b, 50), (int(cx), int(cy)), 16)
-            pygame.draw.circle(ov, (r, g, b, 160), (int(cx), int(cy)), 16, 2)
-        # Pack centre dot
-        pygame.draw.circle(ov, (r, g, b, 220), (int(cx), int(cy)), 5)
-        pygame.draw.circle(ov, (255, 255, 255, 180), (int(cx), int(cy)), 2)
+            pygame.draw.line(ov, (r, g, b, 60), (cx, cy), (px, py), 1)
+        # Pack centre dot (small, pack colour)
+        pygame.draw.circle(ov, (r, g, b, 200), (cx, cy), 4)
+        pygame.draw.circle(ov, (255, 255, 255, 160), (cx, cy), 2)
 
     screen.blit(ov, (0, 0))
 
