@@ -3,7 +3,7 @@ import math
 import random
 import os
 
-from mapgen import WATER, GRASS, DIRT, SNOW, is_walkable_tile, advance_until_blocked
+from mapgen import WATER, GRASS, DIRT, SAND, SNOW, is_walkable_tile, advance_until_blocked
 
 _SHEEP_DIR = os.path.join(os.path.dirname(__file__), "fauna", "sheep")
 
@@ -619,6 +619,50 @@ class Sheep:
                 sx += (ddx / dist) * strength * SEPARATION_FORCE * dt
                 sy += (ddy / dist) * strength * SEPARATION_FORCE * dt
         return sx, sy
+
+    def _beach_avoidance_delta(self, grid: list, rows: int, cols: int, dt: float) -> tuple:
+        """Push sheep away from sand and water tiles to prevent beach stranding.
+        Strong enough to overcome wolf-flee direction when close to the shore."""
+        sx = sy = 0.0
+        PUSH = 14.0
+        CHECK_R = 5
+        for dr in range(-CHECK_R, CHECK_R + 1, 2):
+            for dc in range(-CHECK_R, CHECK_R + 1, 2):
+                r = int(self.ty) + dr
+                c = int(self.tx) + dc
+                if not (0 <= r < rows and 0 <= c < cols):
+                    continue
+                tile = grid[r][c]
+                if tile in (SAND, WATER):
+                    dist = math.hypot(float(dc), float(dr)) or 0.01
+                    w = max(0.0, 1.0 - dist / CHECK_R) * PUSH * dt
+                    sx -= (dc / dist) * w
+                    sy -= (dr / dist) * w
+        return sx, sy
+
+    def _best_inland_direction(self, grid: list, rows: int, cols: int) -> tuple:
+        """8-way scan — return direction with the most grass/dirt (escape beach)."""
+        dirs = [
+            (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0),
+            (0.707, 0.707), (0.707, -0.707), (-0.707, 0.707), (-0.707, -0.707),
+        ]
+        GOOD = {GRASS, DIRT}
+        best_dir   = (0.0, -1.0)
+        best_score = -9999
+        for dx, dy in dirs:
+            score = 0
+            for step in range(1, 10):
+                x, y = self.tx + dx * step, self.ty + dy * step
+                r, c = int(y), int(x)
+                if not (0 <= r < rows and 0 <= c < cols):
+                    score -= 3; break
+                tile = grid[r][c]
+                score += (2 if tile in GOOD
+                          else -3 if tile in (WATER, SAND)
+                          else -1)
+            if score > best_score:
+                best_score, best_dir = score, (dx, dy)
+        return best_dir
 
     def _try_follow(self, flock: list) -> bool:
         for other, _ in self.nearby_sheep:
@@ -1249,6 +1293,11 @@ class Sheep:
                     sx += gx * FLEE_GRASS_WEIGHT * dt
                     sy += gy * FLEE_GRASS_WEIGHT * dt
 
+            # Beach avoidance — always active, strong enough to redirect even wolf-fleeing sheep
+            bx, by = self._beach_avoidance_delta(grid, rows, cols, dt)
+            sx += bx
+            sy += by
+
             speed_mult = 1.0 + urgency * 1.8
             fear_mult = 2.0 if self.wolf_aware else 1.0
             new_tx = self.tx + self.dx * self.move_speed * speed_mult * fear_mult * dt + sx
@@ -1260,10 +1309,18 @@ class Sheep:
             self.tx = move_tx
             self.ty = move_ty
             if blocked:
-                self.state = Sheep.IDLE
-                self.dx    = 0.0
-                self.dy    = 0.0
-                self.timer = random.uniform(0.3, 1.0)
+                cur_tile = grid[int(self.ty)][int(self.tx)] if (
+                    0 <= int(self.ty) < rows and 0 <= int(self.tx) < cols) else ""
+                if cur_tile in (SAND, WATER):
+                    # Stuck on beach — immediately steer inland rather than random IDLE
+                    self.dx, self.dy = self._best_inland_direction(grid, rows, cols)
+                    self._refresh_facing()
+                    self.timer = max(self.timer, random.uniform(1.5, 3.0))
+                else:
+                    self.state = Sheep.IDLE
+                    self.dx    = 0.0
+                    self.dy    = 0.0
+                    self.timer = random.uniform(0.3, 1.0)
 
     # ------------------------------------------------------------------
     # Draw

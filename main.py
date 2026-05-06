@@ -201,13 +201,13 @@ def save_character_library(characters):
 
 def make_blank_character():
     return {
-        "name": "New Human",
+        "name": "Grug",
         "body": "Average",
         "head": "Round",
         "eyes": "Brown",
         "hair": "Short",
-        "hair_color": "Brown",
-        "skin": "Tan",
+        "hair_color": "Black",
+        "skin": "Light",
         "difficulty": "Easy",
     }
 
@@ -406,8 +406,23 @@ def _inflate_hull(hull, cx, cy, pad):
     return out
 
 
+# Pack color palette — distinct from blue (sheep herds), red (wolf hulls), yellow (home dot)
+# Each entry is (R, G, B) for the full-opacity base; alpha is applied per element
+_PACK_COLORS = [
+    (220,  80, 220),   # 0 violet
+    (255, 160,  30),   # 1 orange
+    ( 40, 220, 200),   # 2 teal
+    (255,  60, 140),   # 3 hot-pink
+    (160, 220,  50),   # 4 lime  — use at low alpha so it reads on green grass
+    (255, 200,  40),   # 5 amber
+    ( 80, 180, 255),   # 6 sky-blue (different enough from herd navy)
+    (200, 100,  40),   # 7 burnt-sienna
+]
+_pack_name_font = None   # lazy-initialised pygame font for pack labels
+
+
 def draw_group_overlays(screen, overlay_surf, cam_x, cam_y, tile_size,
-                        sheep_list, wolf_list):
+                        sheep_list, wolf_list, wolf_pack_manager=None):
     sw, sh = screen.get_size()
 
     if overlay_surf[0] is None or overlay_surf[0].get_size() != (sw, sh):
@@ -415,6 +430,7 @@ def draw_group_overlays(screen, overlay_surf, cam_x, cam_y, tile_size,
     ov = overlay_surf[0]
     ov.fill((0, 0, 0, 0))
 
+    # ── Sheep herds — blue convex hull ──────────────────────────────────
     herds: dict[int, list] = {}
     for s in sheep_list:
         if not s.alive or getattr(s, 'dead_state', None) is not None:
@@ -424,20 +440,15 @@ def draw_group_overlays(screen, overlay_surf, cam_x, cam_y, tile_size,
             herds.setdefault(hid, []).append(s)
 
     for members in herds.values():
-        if len(members) > 90:
-            step = max(1, len(members) // 90)
-            draw_members = members[::step]
-        else:
-            draw_members = members
-        pts = [(m.tx * tile_size - cam_x, m.ty * tile_size - cam_y) for m in draw_members]
+        step = max(1, len(members) // 90)
+        pts = [(m.tx * tile_size - cam_x, m.ty * tile_size - cam_y)
+               for m in members[::step]]
         if not pts:
             continue
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
-
         for px, py in pts:
             pygame.draw.line(ov, (80, 140, 255, 90), (int(cx), int(cy)), (int(px), int(py)), 1)
-
         ipts = [(int(p[0]), int(p[1])) for p in pts]
         if len(ipts) >= 3:
             hull = _convex_hull(ipts)
@@ -453,10 +464,61 @@ def draw_group_overlays(screen, overlay_surf, cam_x, cam_y, tile_size,
         else:
             pygame.draw.circle(ov, (60, 120, 255, 45), (int(cx), int(cy)), 14)
             pygame.draw.circle(ov, (100, 160, 255, 140), (int(cx), int(cy)), 14, 2)
-
         pygame.draw.circle(ov, (80, 160, 255, 220), (int(cx), int(cy)), 6)
         pygame.draw.circle(ov, (220, 235, 255, 200), (int(cx), int(cy)), 3)
 
+    # ── Wolf pack home-base ranges + member hull ────────────────────────
+    global _pack_name_font
+    if _pack_name_font is None:
+        _pack_name_font = pygame.font.SysFont(None, 16)
+
+    # Build pack_id → color mapping from WolfPackManager
+    pack_color_map: dict[int, tuple] = {}
+    territories = wolf_pack_manager.get_pack_territories() if wolf_pack_manager else []
+    for pack in territories:
+        cidx = pack.get("color_idx", 0)
+        pack_color_map[pack["pack_id"]] = _PACK_COLORS[cidx % len(_PACK_COLORS)]
+
+    # Draw home-base circles first (behind member hulls)
+    for pack in territories:
+        hx = pack["home_x"]
+        hy = pack["home_y"]
+        if hx == 0.0 and hy == 0.0:
+            continue
+        sx = int(hx * tile_size - cam_x)
+        sy = int(hy * tile_size - cam_y)
+        hr = max(6, int(pack["home_radius"] * tile_size))
+        if sx + hr < 0 or sx - hr > sw or sy + hr < 0 or sy - hr > sh:
+            continue
+
+        r, g, b = pack_color_map.get(pack["pack_id"], (220, 80, 220))
+
+        # Filled range circle — pack colour at low alpha
+        pygame.draw.circle(ov, (r, g, b, 22), (sx, sy), hr)
+        # Outer ring
+        pygame.draw.circle(ov, (r, g, b, 180), (sx, sy), hr, 2)
+        # Inner ring slightly smaller for depth
+        pygame.draw.circle(ov, (r, g, b, 70), (sx, sy), max(3, hr - 6), 1)
+
+        # Home-base centre — always yellow so it pops against any pack colour
+        pygame.draw.circle(ov, (255, 240, 60, 240), (sx, sy), 6)
+        pygame.draw.circle(ov, (255, 255, 200, 200), (sx, sy), 3)
+
+        # Mode pip: small dot on top of centre — bright = hunting, dim = resting
+        if pack["mode"] == "hunt":
+            pygame.draw.circle(ov, (255, 80, 40, 240), (sx, sy - 9), 3)
+        else:
+            pygame.draw.circle(ov, (200, 200, 200, 120), (sx, sy - 9), 3)
+
+        # Pack name label below the centre dot
+        name = pack.get("name", "")
+        if name and tile_size >= 5:
+            txt = _pack_name_font.render(name, True, (r, g, b))
+            txt.set_alpha(210)
+            rect = txt.get_rect(center=(sx, sy + hr + 10))
+            ov.blit(txt, rect)
+
+    # Draw member hull on top of home circles, coloured by pack
     packs: dict[int, list] = {}
     for w in wolf_list:
         if not w.alive or w.dead_state is not None:
@@ -465,39 +527,35 @@ def draw_group_overlays(screen, overlay_surf, cam_x, cam_y, tile_size,
         if pid >= 0:
             packs.setdefault(pid, []).append(w)
 
-    for members in packs.values():
-        if len(members) > 90:
-            step = max(1, len(members) // 90)
-            draw_members = members[::step]
-        else:
-            draw_members = members
-        pts = [(m.tx * tile_size - cam_x, m.ty * tile_size - cam_y) for m in draw_members]
+    for pid, members in packs.items():
+        r, g, b = pack_color_map.get(pid, (220, 80, 220))
+        step = max(1, len(members) // 90)
+        pts  = [(m.tx * tile_size - cam_x, m.ty * tile_size - cam_y)
+                for m in members[::step]]
         if not pts:
             continue
         cx = sum(p[0] for p in pts) / len(pts)
         cy = sum(p[1] for p in pts) / len(pts)
-
         for px, py in pts:
-            pygame.draw.line(ov, (255, 80, 60, 90), (int(cx), int(cy)), (int(px), int(py)), 1)
-
+            pygame.draw.line(ov, (r, g, b, 70), (int(cx), int(cy)), (int(px), int(py)), 1)
         ipts = [(int(p[0]), int(p[1])) for p in pts]
         if len(ipts) >= 3:
             hull = _convex_hull(ipts)
             if len(hull) >= 3:
                 inflated = _inflate_hull(hull, cx, cy, 16)
-                pygame.draw.polygon(ov, (255, 60, 40, 36), inflated)
-                pygame.draw.polygon(ov, (255, 110, 80, 140), inflated, 2)
+                pygame.draw.polygon(ov, (r, g, b, 28), inflated)
+                pygame.draw.polygon(ov, (r, g, b, 170), inflated, 2)
         elif len(ipts) == 2:
-            pygame.draw.line(ov, (255, 80, 60, 80), ipts[0], ipts[1], 2)
+            pygame.draw.line(ov, (r, g, b, 80), ipts[0], ipts[1], 2)
             for p in ipts:
-                pygame.draw.circle(ov, (255, 60, 40, 50), p, 16)
-                pygame.draw.circle(ov, (255, 110, 80, 130), p, 16, 2)
+                pygame.draw.circle(ov, (r, g, b, 45), p, 16)
+                pygame.draw.circle(ov, (r, g, b, 140), p, 16, 2)
         else:
-            pygame.draw.circle(ov, (255, 60, 40, 50), (int(cx), int(cy)), 16)
-            pygame.draw.circle(ov, (255, 110, 80, 140), (int(cx), int(cy)), 16, 2)
-
-        pygame.draw.circle(ov, (255, 100, 70, 220), (int(cx), int(cy)), 6)
-        pygame.draw.circle(ov, (255, 230, 220, 200), (int(cx), int(cy)), 3)
+            pygame.draw.circle(ov, (r, g, b, 50), (int(cx), int(cy)), 16)
+            pygame.draw.circle(ov, (r, g, b, 160), (int(cx), int(cy)), 16, 2)
+        # Pack centre dot
+        pygame.draw.circle(ov, (r, g, b, 220), (int(cx), int(cy)), 5)
+        pygame.draw.circle(ov, (255, 255, 255, 180), (int(cx), int(cy)), 2)
 
     screen.blit(ov, (0, 0))
 
@@ -1004,8 +1062,7 @@ def main():
         for label, ms in sorted(_profile_ms.items(), key=lambda item: item[1], reverse=True)[:10]:
             count = _profile_counts.get(label)
             suffix = f" ({count})" if count is not None else ""
-            pct = ms / max(_frame_ms, 0.001) * 100.0
-            lines.append(f"{label}: {ms:5.2f} ms {pct:4.0f}%{suffix}")
+            lines.append(f"{label}: {ms:5.2f} ms{suffix}")
         return lines
 
     def _sheep_update_stride(count: int) -> int:
@@ -1666,7 +1723,7 @@ def main():
             if show_groups:
                 group_draw_start = time.perf_counter()
                 draw_group_overlays(screen, _group_overlay, cam_x, cam_y, current_zoom,
-                                    sheep_list, wolf_list)
+                                    sheep_list, wolf_list, wolf_pack_manager)
                 _profile_add("group overlay draw", group_draw_start)
 
             # Day/night overlay
